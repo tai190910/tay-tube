@@ -1,0 +1,37 @@
+[package]
+name = "tay-tube-pc"
+version = "1.0.0"
+description = "Desktop YouTube Player Application for PC - Tày Tube"
+authors = ["Tay Tube Team"]
+edition = "2021"
+
+[lib]
+name = "tay_tube_pc_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "tay-tube-pc"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+url = "2"
+urlencoding = "2"
+sha2 = "0.10"
+hex = "0.4"
+futures-util = "0.3"
+
+[profile.release]
+panic = "abort"
+lto = "thin"
+opt-level = "s"
+strip = true

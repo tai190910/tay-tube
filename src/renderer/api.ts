@@ -1,0 +1,74 @@
+import { invoke } from '@tauri-apps/api/core';
+import {
+  CommentsResult,
+  FavoriteItemUI,
+  HistoryItemUI,
+  ResumeItemUI,
+  TayTubeVideoDetails,
+  VideoItemUI,
+} from './types.js';
+
+export const desktopAPI = {
+  // Video Core APIs
+  getVideoDetails: (
+    urlOrId: string,
+    options?: { targetQuality?: number; preferHdr?: boolean }
+  ): Promise<TayTubeVideoDetails> =>
+    invoke<TayTubeVideoDetails>('get_video_details', { urlOrId, options }),
+
+  searchVideos: (query: string): Promise<VideoItemUI[]> =>
+    invoke<VideoItemUI[]>('search_videos', { query }),
+
+  getTrendingVideos: (): Promise<VideoItemUI[]> =>
+    invoke<VideoItemUI[]>('get_trending_videos'),
+
+  getVideoComments: (videoId: string): Promise<CommentsResult> =>
+    invoke<CommentsResult>('get_video_comments', { videoId }),
+
+  // SQLite Database APIs (rusqlite bundled in Tauri backend)
+  getHistory: (limit = 100): Promise<HistoryItemUI[]> =>
+    invoke<HistoryItemUI[]>('db_get_history', { limit }),
+
+  addToHistory: (item: {
+    id: string;
+    title: string;
+    channel: string;
+    thumbnail: string;
+    durationSec: number;
+  }): Promise<void> => invoke<void>('db_add_to_history', { item }),
+
+  clearHistory: (): Promise<void> => invoke<void>('db_clear_history'),
+
+  deleteHistoryItem: (id: string): Promise<void> =>
+    invoke<void>('db_delete_history_item', { id }),
+
+  getResume: (id: string): Promise<ResumeItemUI | null> =>
+    invoke<ResumeItemUI | null>('db_get_resume', { id }),
+
+  getAllResumes: (): Promise<Record<string, ResumeItemUI>> =>
+    invoke<Record<string, ResumeItemUI>>('db_get_all_resumes'),
+
+  saveResume: (id: string, positionMs: number, durationMs: number): Promise<void> =>
+    invoke<void>('db_save_resume', { id, positionMs, durationMs }),
+
+  getFavorites: (): Promise<FavoriteItemUI[]> =>
+    invoke<FavoriteItemUI[]>('db_get_favorites'),
+
+  isFavorite: (id: string): Promise<boolean> =>
+    invoke<boolean>('db_is_favorite', { id }),
+
+  toggleFavorite: (item: {
+    id: string;
+    title: string;
+    channel: string;
+    thumbnail: string;
+    durationSec: number;
+  }): Promise<boolean> => invoke<boolean>('db_toggle_favorite', { item }),
+
+  // Native Window Controls
+  minimizeWindow: (): Promise<void> => invoke<void>('window_minimize'),
+  maximizeWindow: (): Promise<void> => invoke<void>('window_toggle_maximize'),
+  closeWindow: (): Promise<void> => invoke<void>('window_close'),
+  toggleFullscreen: (): Promise<boolean> => invoke<boolean>('window_toggle_fullscreen'),
+  isFullscreen: (): Promise<boolean> => invoke<boolean>('window_is_fullscreen'),
+};

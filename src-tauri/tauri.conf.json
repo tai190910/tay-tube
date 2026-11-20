@@ -1,0 +1,51 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Tay-Tube-PC",
+  "version": "1.0.0",
+  "identifier": "com.taytube.pc",
+  "build": {
+    "beforeDevCommand": "npm run dev:renderer",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist-renderer"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Tày Tube PC",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "decorations": false,
+        "resizable": true,
+        "backgroundColor": "#0b0b0b",
+        "additionalBrowserArgs": "--autoplay-policy=no-user-gesture-required --enable-gpu-rasterization --enable-zero-copy"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' ipc: http://ipc.localhost tauri: http://tauri.localhost; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; worker-src 'self' blob:; img-src 'self' data: blob: https://*.ytimg.com https://*.ggpht.com https://*.googleusercontent.com https://*.youtube.com; media-src 'self' blob: data: http://127.0.0.1:8989 https://*.googlevideo.com; connect-src 'self' ipc: http://ipc.localhost tauri: http://tauri.localhost http://127.0.0.1:8989 blob: data: https://*.googlevideo.com https://*.youtube.com https://sponsor.ajay.app;",
+      "devCsp": "default-src 'self' ipc: http://ipc.localhost; script-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:5173; style-src 'self' 'unsafe-inline' http://localhost:5173; font-src 'self' data:; worker-src 'self' blob:; img-src 'self' data: blob: https://*.ytimg.com https://*.ggpht.com https://*.googleusercontent.com https://*.youtube.com; media-src 'self' blob: data: http://127.0.0.1:8989 https://*.googlevideo.com; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:8989 http://localhost:5173 ws://localhost:5173 blob: data: https://*.googlevideo.com https://*.youtube.com https://sponsor.ajay.app;"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false
+      }
+    }
+  }
+}

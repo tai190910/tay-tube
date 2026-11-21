@@ -88,6 +88,7 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const shakaPlayerRef = useRef<any | null>(null);
+  const shakaAttachPromiseRef = useRef<Promise<void> | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const seekbarRef = useRef<HTMLDivElement | null>(null);
   const isDestroyedRef = useRef<boolean>(false);
@@ -101,6 +102,8 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [playbackRate, setPlaybackRate] = useState<number>(1);
   const [isBuffering, setIsBuffering] = useState<boolean>(false);
+  const [playbackError, setPlaybackError] = useState<string | null>(null);
+  const [reloadNonce, setReloadNonce] = useState<number>(0);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
 
   // Seekbar Hover & Drag Scrubbing States
@@ -160,11 +163,11 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
     }, 2500);
   }, []);
 
-  // Resolve Official HLS URL (from YouTube iOS client)
+  // Resolve Official HLS URL (from YouTube VISIONOS / iOS client via .m3u8 proxy)
   const hlsUrl = useMemo(() => {
     if (details.proxyHlsUrl) return details.proxyHlsUrl;
     if (details.hlsManifestUrl) {
-      return `http://127.0.0.1:8989/hls-manifest?url=${encodeURIComponent(details.hlsManifestUrl)}&id=${encodeURIComponent(details.id)}`;
+      return `http://127.0.0.1:8989/hls.m3u8?url=${encodeURIComponent(details.hlsManifestUrl)}&id=${encodeURIComponent(details.id)}`;
     }
     return '';
   }, [details.id, details.proxyHlsUrl, details.hlsManifestUrl]);
@@ -222,7 +225,7 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
     }, 3000);
   }, []);
 
-  // Helper: Select matching HLS resolution inside already-loaded Shaka Player
+  // Helper: Select matching HLS resolution inside already-loaded Shaka Player (preferring H.264 avc1 for hardware decode)
   const applyHlsQuality = useCallback((player: any, targetHeight: number) => {
     if (!player) return;
     try {
@@ -236,16 +239,34 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
         setHlsQualities(heights);
       }
 
+      const isAvc = (t: any) => String(t?.videoCodec || '').toLowerCase().startsWith('avc1');
       const sortedMatches = tracks
         .filter((t: any) => t.height === targetHeight)
-        .sort((a: any, b: any) => (b.bandwidth || 0) - (a.bandwidth || 0));
+        .sort(
+          (a: any, b: any) =>
+            Number(isAvc(b)) - Number(isAvc(a)) || (b.bandwidth || 0) - (a.bandwidth || 0)
+        );
 
       let chosen = sortedMatches[0];
       if (!chosen) {
         const lower = tracks
           .filter((t: any) => t.height && t.height <= targetHeight)
-          .sort((a: any, b: any) => b.height - a.height || (b.bandwidth || 0) - (a.bandwidth || 0));
-        chosen = lower[0] || tracks.sort((a: any, b: any) => (b.height || 0) - (a.height || 0))[0];
+          .sort(
+            (a: any, b: any) =>
+              b.height - a.height ||
+              Number(isAvc(b)) - Number(isAvc(a)) ||
+              (b.bandwidth || 0) - (a.bandwidth || 0)
+          );
+        chosen =
+          lower[0] ||
+          tracks
+            .slice()
+            .sort(
+              (a: any, b: any) =>
+                (b.height || 0) - (a.height || 0) ||
+                Number(isAvc(b)) - Number(isAvc(a)) ||
+                (b.bandwidth || 0) - (a.bandwidth || 0)
+            )[0];
       }
 
       if (chosen) {
@@ -261,6 +282,7 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
   const destroyPlayerImmediately = useCallback(() => {
     if (isDestroyedRef.current) return;
     isDestroyedRef.current = true;
+    shakaAttachPromiseRef.current = null;
 
     if (controlsTimeoutRef.current) {
       clearTimeout(controlsTimeoutRef.current);
@@ -390,7 +412,7 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
     if (!video) return;
 
     const player = new shaka.Player();
-    player.attach(video);
+    shakaAttachPromiseRef.current = player.attach(video).catch(() => {});
 
     player.configure({
       streaming: {
@@ -422,11 +444,15 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
       }
     });
 
-    player.addEventListener('error', () => {
+    player.addEventListener('error', (event: any) => {
+      console.error('[AvSyncPlayer Shaka Error]', event?.detail || event);
       if (isDestroyedRef.current) return;
       if (streamModeRef.current === 'hls' && muxedFallbackSrcRef.current) {
-        showToast('HLS gặp sự cố, tự động chuyển sang MP4 720p trực tiếp');
+        showToast('HLS gặp sự cố, tự động chuyển sang MP4 trực tiếp');
         setStreamMode('muxed');
+      } else {
+        setIsBuffering(false);
+        setPlaybackError('Không thể tải luồng phát video. Nhấn thử lại hoặc chọn chất lượng khác.');
       }
     });
 
@@ -446,6 +472,7 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
     if (!video || isDestroyedRef.current) return;
 
     let cancelled = false;
+    setPlaybackError(null);
     setIsBuffering(true);
 
     const resumeAt = currentTimeRef.current > 1 ? currentTimeRef.current : initialPosRef.current;
@@ -453,6 +480,11 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
     const loadStream = async () => {
       try {
         if (streamMode === 'hls' && hlsUrl && player) {
+          if (shakaAttachPromiseRef.current) {
+            await shakaAttachPromiseRef.current;
+          }
+          if (cancelled || isDestroyedRef.current) return;
+
           if (video.src) {
             video.removeAttribute('src');
             video.load();
@@ -475,6 +507,7 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
           const fallbackUrl = muxedFallbackSrc;
           if (!fallbackUrl) {
             setIsBuffering(false);
+            setPlaybackError('Không tìm thấy luồng phát video phù hợp.');
             return;
           }
 
@@ -505,13 +538,15 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
               setIsBuffering(false);
             }
           });
-      } catch {
+      } catch (err) {
+        console.error('[AvSyncPlayer Load Error]', err);
         if (cancelled || isDestroyedRef.current) return;
         if (streamMode === 'hls' && muxedFallbackSrc) {
-          showToast('Không tải được HLS, chuyển sang MP4 720p trực tiếp');
+          showToast('Không tải được HLS, chuyển sang MP4 trực tiếp');
           setStreamMode('muxed');
         } else {
           setIsBuffering(false);
+          setPlaybackError('Không thể tải luồng phát video. Nhấn thử lại hoặc chọn chất lượng khác.');
         }
       }
     };
@@ -521,7 +556,16 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [details.id, streamMode, hlsUrl, muxedFallbackSrc, applyHlsQuality, showToast, scheduleHideControls]);
+  }, [
+    details.id,
+    streamMode,
+    hlsUrl,
+    muxedFallbackSrc,
+    reloadNonce,
+    applyHlsQuality,
+    showToast,
+    scheduleHideControls,
+  ]);
 
   // ==========================================================================
   // 4. QUALITY SWITCHING IN HLS MODE (Seamless track switch without re-init)
@@ -889,6 +933,17 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
             controlsTimeoutRef.current = null;
           }
         }}
+        onError={() => {
+          if (isDestroyedRef.current) return;
+          if (!videoRef.current?.currentSrc && !shakaPlayerRef.current) return;
+          if (streamModeRef.current === 'hls' && muxedFallbackSrcRef.current) {
+            showToast('HLS gặp sự cố, tự động chuyển sang MP4 trực tiếp');
+            setStreamMode('muxed');
+          } else {
+            setIsBuffering(false);
+            setPlaybackError('Trình duyệt không giải mã được luồng video này.');
+          }
+        }}
         onProgress={updateBufferedRange}
         onTimeUpdate={handleTimeUpdate}
         onDurationChange={() => {
@@ -903,9 +958,34 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
       />
 
       {/* Buffering Spinner */}
-      {isBuffering && (
+      {isBuffering && !playbackError && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/35 pointer-events-none z-20">
           <div className="w-11 h-11 border-[3px] border-yt-red border-t-transparent rounded-full animate-spin" />
+        </div>
+      )}
+
+      {/* Playback Error & Retry Overlay */}
+      {playbackError && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 z-30 px-6 text-center space-y-3">
+          <p className="text-sm font-semibold text-white max-w-md">{playbackError}</p>
+          <div className="flex items-center space-x-2.5">
+            <button
+              type="button"
+              onClick={() => setReloadNonce((n) => n + 1)}
+              className="px-4 py-2 min-h-[40px] bg-yt-red hover:bg-red-700 text-white text-xs font-semibold rounded-[8px] transition-colors"
+            >
+              Thử lại
+            </button>
+            {streamMode === 'hls' && muxedFallbackSrc && (
+              <button
+                type="button"
+                onClick={() => setStreamMode('muxed')}
+                className="px-4 py-2 min-h-[40px] bg-[#222] hover:bg-[#2c2c2c] border border-white/10 text-white text-xs font-semibold rounded-[8px] transition-colors"
+              >
+                Chuyển sang MP4 trực tiếp
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -948,7 +1028,7 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
       </div>
 
       {/* Center Play Indicator when Paused */}
-      {!isPlaying && !isBuffering && (
+      {!isPlaying && !isBuffering && !playbackError && (
         <button
           type="button"
           onClick={togglePlay}

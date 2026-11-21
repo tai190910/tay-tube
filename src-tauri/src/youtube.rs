@@ -210,6 +210,13 @@ pub fn extract_url_client_param(raw_url: &str) -> Option<String> {
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StreamExtractMode {
+    Video,
+    Audio,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamRange {
@@ -650,7 +657,7 @@ impl YouTubeService {
         self.ensure_visitor_data().await;
     }
 
-    fn is_playable(resp: &Value) -> bool {
+    fn is_playable_for_mode(resp: &Value, mode: StreamExtractMode) -> bool {
         let status = resp
             .get("playabilityStatus")
             .and_then(|p| p.get("status"))
@@ -666,33 +673,55 @@ impl YouTubeService {
             return false;
         };
 
-        if streaming
-            .get("hlsManifestUrl")
-            .and_then(|v| v.as_str())
-            .map(|s| !s.is_empty())
-            .unwrap_or(false)
-        {
-            return true;
-        }
-
-        let has_formats = streaming
+        let has_muxed = streaming
             .get("formats")
             .and_then(|v| v.as_array())
             .map(|a| a.iter().any(|f| extract_format_url(f).is_some()))
             .unwrap_or(false);
-        let has_adaptive = streaming
-            .get("adaptiveFormats")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().any(|f| extract_format_url(f).is_some()))
-            .unwrap_or(false);
 
-        has_formats || has_adaptive
+        let has_mime = |prefix: &str| {
+            streaming
+                .get("adaptiveFormats")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter().any(|f| {
+                        let mime = f
+                            .get("mimeType")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("")
+                            .to_lowercase();
+                        mime.starts_with(prefix) && extract_format_url(f).is_some()
+                    })
+                })
+                .unwrap_or(false)
+        };
+
+        match mode {
+            StreamExtractMode::Audio => has_mime("audio/") || has_muxed,
+            StreamExtractMode::Video => {
+                let has_hls = streaming
+                    .get("hlsManifestUrl")
+                    .and_then(|v| v.as_str())
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false);
+                has_hls || has_mime("video/") || has_muxed
+            }
+        }
     }
 
-    pub async fn resolve_player(&self, video_id: &str) -> Result<Value, String> {
+    fn is_playable(resp: &Value) -> bool {
+        Self::is_playable_for_mode(resp, StreamExtractMode::Video)
+            || Self::is_playable_for_mode(resp, StreamExtractMode::Audio)
+    }
+
+    pub async fn resolve_player_for_mode(
+        &self,
+        video_id: &str,
+        mode: StreamExtractMode,
+    ) -> Result<Value, String> {
         if let Ok(cache) = self.player_cache.read() {
             if let Some((at, data)) = cache.get(video_id) {
-                if at.elapsed() < CACHE_TTL_PLAYER {
+                if at.elapsed() < CACHE_TTL_PLAYER && Self::is_playable_for_mode(data, mode) {
                     return Ok(data.clone());
                 }
             }
@@ -719,7 +748,7 @@ impl YouTubeService {
             });
 
             if let Ok(resp) = self.innertube_request("player", body, client_cfg).await {
-                if Self::is_playable(&resp) {
+                if Self::is_playable_for_mode(&resp, mode) {
                     if let Ok(mut cache) = self.player_cache.write() {
                         cache.insert(video_id.to_string(), (Instant::now(), resp.clone()));
                     }
@@ -729,8 +758,34 @@ impl YouTubeService {
         }
 
         Err(format!(
-            "Could not retrieve playable streams for video {video_id} across all fallback clients."
+            "Could not retrieve playable streams for video {video_id} ({mode:?}) across all fallback clients."
         ))
+    }
+
+    pub async fn resolve_player(&self, video_id: &str) -> Result<Value, String> {
+        self.resolve_player_for_mode(video_id, StreamExtractMode::Video)
+            .await
+    }
+
+    async fn fetch_muxed_mp4_fallback(&self, video_id: &str) -> Vec<Value> {
+        self.ensure_visitor_data().await;
+        let body = json!({
+            "videoId": video_id,
+            "contentCheckOk": true,
+            "racyCheckOk": true
+        });
+        let Ok(resp) = self.innertube_request("player", body, &CLIENT_ANDROID).await else {
+            return Vec::new();
+        };
+        resp.pointer("/streamingData/formats")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter(|f| extract_format_url(f).is_some())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub async fn fetch_ios_streaming_data(&self, video_id: &str) -> IosStreamingData {
@@ -1047,38 +1102,89 @@ impl YouTubeService {
         url_or_id: &str,
         target_quality: Option<i64>,
         prefer_hdr: Option<bool>,
+        mode: Option<StreamExtractMode>,
     ) -> Result<TayTubeVideoDetails, String> {
         let video_id = Self::extract_video_id(url_or_id)?;
+        let extract_mode = mode.unwrap_or(StreamExtractMode::Video);
 
-        let (player_res, ios_data, sponsor_segments, related_videos) = tokio::join!(
-            self.resolve_player(&video_id),
-            self.fetch_ios_streaming_data(&video_id),
-            self.fetch_sponsor_segments(&video_id),
-            self.fetch_related_videos(&video_id),
-        );
+        self.ensure_visitor_data().await;
 
-        let mut player_resp = player_res?;
-        merge_streaming_formats(&mut player_resp, &ios_data);
+        let (player_resp, ios_data, sponsor_segments, related_videos) = match extract_mode {
+            StreamExtractMode::Video => {
+                let (player_res, ios_data, muxed_fallback, sponsor_segments, related_videos) =
+                    tokio::join!(
+                        self.resolve_player_for_mode(&video_id, StreamExtractMode::Video),
+                        self.fetch_ios_streaming_data(&video_id),
+                        self.fetch_muxed_mp4_fallback(&video_id),
+                        self.fetch_sponsor_segments(&video_id),
+                        self.fetch_related_videos(&video_id),
+                    );
 
-        let player_hls = player_resp
-            .get("streamingData")
-            .and_then(|sd| sd.get("hlsManifestUrl"))
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
-        let hls_from_player = player_hls.is_some();
-        let raw_hls_url = player_hls.or_else(|| ios_data.hls_manifest_url.clone());
+                let mut resp = player_res?;
+                merge_streaming_formats(&mut resp, &ios_data);
+                if !muxed_fallback.is_empty() {
+                    let muxed_extra = IosStreamingData {
+                        formats: muxed_fallback,
+                        ..Default::default()
+                    };
+                    merge_streaming_formats(&mut resp, &muxed_extra);
+                }
+                (resp, ios_data, sponsor_segments, related_videos)
+            }
+            StreamExtractMode::Audio => {
+                let (player_res, sponsor_segments, related_videos) = tokio::join!(
+                    self.resolve_player_for_mode(&video_id, StreamExtractMode::Audio),
+                    self.fetch_sponsor_segments(&video_id),
+                    self.fetch_related_videos(&video_id),
+                );
+                let mut resp = player_res?;
+                let pre_parsed = parse_stream_formats(resp.get("streamingData"));
+                if pre_parsed.audio_only.is_empty() {
+                    let ios_extra = self.fetch_ios_streaming_data(&video_id).await;
+                    merge_streaming_formats(&mut resp, &ios_extra);
+                }
+                (resp, IosStreamingData::default(), sponsor_segments, related_videos)
+            }
+        };
 
-        let parsed = parse_stream_formats(player_resp.get("streamingData"));
+        let (player_hls, hls_from_player, raw_hls_url) = if extract_mode == StreamExtractMode::Video {
+            let phls = player_resp
+                .get("streamingData")
+                .and_then(|sd| sd.get("hlsManifestUrl"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            let from_player = phls.is_some();
+            let raw = phls.clone().or_else(|| ios_data.hls_manifest_url.clone());
+            (phls, from_player, raw)
+        } else {
+            (None, false, None)
+        };
+        let _ = player_hls;
+
+        let mut parsed = parse_stream_formats(player_resp.get("streamingData"));
+        if extract_mode == StreamExtractMode::Audio {
+            parsed.video_only.clear();
+            parsed.all_qualities.clear();
+            parsed.hdr_qualities.clear();
+        }
         let target_h = target_quality.unwrap_or(1080);
         let pref_hdr = prefer_hdr.unwrap_or(false);
-        let selected = select_quality(
+        let mut selected = select_quality(
             &parsed.video_only,
             &parsed.audio_only,
             &parsed.muxed,
             target_h,
             pref_hdr,
         );
+        if extract_mode == StreamExtractMode::Audio {
+            selected.video = None;
+            if selected.audio.is_some() {
+                selected.muxed = None;
+            }
+            selected.is_separate = false;
+            selected.quality_label = "Audio".to_string();
+        }
 
         let caption_tracks = extract_caption_tracks(&player_resp);
 
@@ -1125,12 +1231,28 @@ impl YouTubeService {
 
         let proxy_hls_url = raw_hls_url.as_ref().map(|hls| {
             format!(
-                "http://127.0.0.1:8989/hls-manifest?url={}&client={}&id={}",
+                "http://127.0.0.1:8989/hls.m3u8?url={}&client={}&id={}",
                 urlencoding::encode(hls),
                 urlencoding::encode(&hls_client_name),
                 urlencoding::encode(&video_id)
             )
         });
+
+        eprintln!(
+            "[TayTube Stream] id={} mode={:?} | video_af={} audio_af={} muxed={} has_hls={} | selected_video_itag={:?} selected_muxed_itag={:?} selected_audio_itag={:?} | hls_client={} | proxy_hls={} | proxy_video={}",
+            video_id,
+            extract_mode,
+            parsed.video_only.len(),
+            parsed.audio_only.len(),
+            parsed.muxed.len(),
+            raw_hls_url.is_some(),
+            selected.video.as_ref().map(|v| v.itag),
+            selected.muxed.as_ref().map(|m| m.itag),
+            selected.audio.as_ref().map(|a| a.itag),
+            hls_client_name,
+            proxy_hls_url.as_deref().map(|u| &u[..u.len().min(72)]).unwrap_or("none"),
+            proxy_video_url.as_deref().map(|u| &u[..u.len().min(72)]).unwrap_or("none"),
+        );
 
         let vd = player_resp.get("videoDetails");
         let title = vd
@@ -2145,8 +2267,10 @@ impl YouTubeService {
     ) -> Result<MusicAudioStreamResult, String> {
         let vid = Self::extract_video_id(video_id)?;
 
+        self.ensure_visitor_data().await;
+
         let (player_res, radio_res) = tokio::join!(
-            self.resolve_player(&vid),
+            self.resolve_player_for_mode(&vid, StreamExtractMode::Audio),
             self.get_music_radio(&vid, playlist_id)
         );
 
@@ -2188,6 +2312,15 @@ impl YouTubeService {
             urlencoding::encode(&resolved_client),
             urlencoding::encode(&vid),
             itag
+        );
+
+        eprintln!(
+            "[TayTube Music] id={} mode=Audio | audio_af={} | selected_itag={} client={} bitrate={}",
+            vid,
+            parsed.audio_only.len(),
+            itag,
+            resolved_client,
+            bitrate
         );
 
         let vd = player_resp.get("videoDetails");
@@ -4490,5 +4623,53 @@ mod tests {
             }
         });
         assert!(YouTubeService::is_playable(&playable));
+    }
+
+    #[test]
+    fn is_playable_for_mode_separates_video_and_audio_requirements() {
+        let audio_only_resp = json!({
+            "playabilityStatus": { "status": "OK" },
+            "streamingData": {
+                "adaptiveFormats": [
+                    { "itag": 140, "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "url": "https://rr1.googlevideo.com/videoplayback?itag=140" }
+                ]
+            }
+        });
+        assert!(YouTubeService::is_playable_for_mode(
+            &audio_only_resp,
+            StreamExtractMode::Audio
+        ));
+        assert!(!YouTubeService::is_playable_for_mode(
+            &audio_only_resp,
+            StreamExtractMode::Video
+        ));
+
+        let video_only_resp = json!({
+            "playabilityStatus": { "status": "OK" },
+            "streamingData": {
+                "adaptiveFormats": [
+                    { "itag": 137, "mimeType": "video/mp4; codecs=\"avc1.640028\"", "url": "https://rr1.googlevideo.com/videoplayback?itag=137" }
+                ]
+            }
+        });
+        assert!(YouTubeService::is_playable_for_mode(
+            &video_only_resp,
+            StreamExtractMode::Video
+        ));
+        assert!(!YouTubeService::is_playable_for_mode(
+            &video_only_resp,
+            StreamExtractMode::Audio
+        ));
+
+        let hls_resp = json!({
+            "playabilityStatus": { "status": "OK" },
+            "streamingData": {
+                "hlsManifestUrl": "https://manifest.googlevideo.com/api/manifest/hls_variant/index.m3u8"
+            }
+        });
+        assert!(YouTubeService::is_playable_for_mode(
+            &hls_resp,
+            StreamExtractMode::Video
+        ));
     }
 }

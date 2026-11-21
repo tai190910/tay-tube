@@ -37,7 +37,7 @@ export const desktopAPI = {
   // Video Core & Authenticated InnerTube APIs
   getVideoDetails: (
     urlOrId: string,
-    options?: { targetQuality?: number; preferHdr?: boolean }
+    options?: { targetQuality?: number; preferHdr?: boolean; mode?: 'video' | 'audio' }
   ): Promise<TayTubeVideoDetails> =>
     invoke<TayTubeVideoDetails>('get_video_details', { urlOrId, options }),
 

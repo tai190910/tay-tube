@@ -156,6 +156,7 @@ export const ShortsScreen: React.FC<ShortsScreenProps> = ({
         const details: TayTubeVideoDetails = await desktopAPI.getVideoDetails(currentItem.id, {
           targetQuality: 1080,
           preferHdr: false,
+          mode: 'video',
         });
         if (loadSeqRef.current !== seq) return;
 
@@ -176,17 +177,21 @@ export const ShortsScreen: React.FC<ShortsScreenProps> = ({
           )
         );
 
-        const muxed = details.selectedStreams?.muxed;
+        const muxed =
+          details.selectedStreams?.muxed ||
+          details.allVideoStreams?.find((v) => v.isMuxed && v.url) ||
+          null;
         const hlsUrl =
           details.proxyHlsUrl ||
           (details.hlsManifestUrl
-            ? `http://127.0.0.1:8989/hls-manifest?url=${encodeURIComponent(details.hlsManifestUrl)}&id=${encodeURIComponent(details.id)}`
+            ? `http://127.0.0.1:8989/hls.m3u8?url=${encodeURIComponent(details.hlsManifestUrl)}&id=${encodeURIComponent(details.id)}`
             : null);
         const directProxyUrl = muxed
           ? `http://127.0.0.1:8989/stream?url=${encodeURIComponent(muxed.url)}&id=${encodeURIComponent(details.id)}&itag=${muxed.itag}`
-          : null;
+          : details.proxyVideoUrl || null;
 
         if (hlsUrl && shaka.Player.isBrowserSupported()) {
+          shaka.polyfill.installAll();
           const player = new shaka.Player();
           await player.attach(video);
           if (loadSeqRef.current !== seq) {
@@ -198,19 +203,61 @@ export const ShortsScreen: React.FC<ShortsScreenProps> = ({
             streaming: {
               bufferingGoal: 12,
               rebufferingGoal: 2,
+              ignoreTextStreamFailures: true,
               retryParameters: { maxAttempts: 3, baseDelay: 500, backoffFactor: 1.5 },
+            },
+            manifest: {
+              hls: {
+                ignoreManifestProgramDateTime: true,
+              },
             },
           });
 
+          player.addEventListener('buffering', (evt: any) => {
+            if (loadSeqRef.current === seq) {
+              setIsBuffering(Boolean(evt?.buffering));
+            }
+          });
+
+          player.addEventListener('error', (evt: any) => {
+            console.error('[ShortsScreen Shaka Error]', evt?.detail || evt);
+            if (loadSeqRef.current !== seq) return;
+            if (directProxyUrl) {
+              player.destroy().catch(() => {});
+              if (shakaPlayerRef.current === player) shakaPlayerRef.current = null;
+              video.src = directProxyUrl;
+              video.load();
+              video.play().catch(() => {});
+            } else {
+              setStreamError('Không thể tải luồng phát cho Short này.');
+              setIsBuffering(false);
+            }
+          });
+
           try {
-            await player.load(hlsUrl);
-          } catch {
+            await player.load(hlsUrl, null, 'application/x-mpegurl');
+            if (loadSeqRef.current !== seq) return;
+            const tracks = player.getVariantTracks?.() || [];
+            const avcTracks = tracks
+              .filter((t: any) => String(t?.videoCodec || '').toLowerCase().startsWith('avc1'))
+              .sort((a: any, b: any) => (b.height || 0) - (a.height || 0));
+            const chosen = avcTracks.find((t: any) => (t.height || 0) <= 1080) || avcTracks[0];
+            if (chosen) {
+              player.configure({ abr: { enabled: false } });
+              player.selectVariantTrack(chosen, true);
+            }
+          } catch (err) {
+            console.error('[ShortsScreen Load Error]', err);
             if (loadSeqRef.current !== seq) return;
             await player.destroy();
             if (shakaPlayerRef.current === player) shakaPlayerRef.current = null;
             if (directProxyUrl) {
               video.src = directProxyUrl;
               video.load();
+            } else {
+              setStreamError('Không tải được luồng phát HLS cho Short này.');
+              setIsBuffering(false);
+              return;
             }
           }
         } else if (directProxyUrl) {
@@ -404,11 +451,17 @@ export const ShortsScreen: React.FC<ShortsScreenProps> = ({
             poster={currentItem.thumbnail}
             onClick={togglePlay}
             onWaiting={() => setIsBuffering(true)}
+            onCanPlay={() => setIsBuffering(false)}
             onPlaying={() => {
               setIsBuffering(false);
               setIsPlaying(true);
             }}
             onPause={() => setIsPlaying(false)}
+            onError={() => {
+              if (!videoRef.current?.currentSrc && !shakaPlayerRef.current) return;
+              setIsBuffering(false);
+              setStreamError('Trình phát không thể giải mã luồng video Short này.');
+            }}
             onTimeUpdate={() => {
               if (videoRef.current) setCurrentTime(videoRef.current.currentTime || 0);
             }}

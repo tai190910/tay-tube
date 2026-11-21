@@ -62,6 +62,10 @@ pub async fn start_proxy_server(yt: Arc<YouTubeService>) {
 
     let app = Router::new()
         .route("/stream", get(handle_stream).options(handle_cors_preflight))
+        .route("/stream.ts", get(handle_stream_ts).options(handle_cors_preflight))
+        .route("/stream.mp4", get(handle_stream_mp4).options(handle_cors_preflight))
+        .route("/stream.aac", get(handle_stream_aac).options(handle_cors_preflight))
+        .route("/stream.vtt", get(handle_stream_vtt).options(handle_cors_preflight))
         .route("/hls-manifest", get(handle_hls_manifest).options(handle_cors_preflight))
         .route("/hls.m3u8", get(handle_hls_manifest).options(handle_cors_preflight))
         .route("/subtitle", get(handle_subtitle).options(handle_cors_preflight))
@@ -260,11 +264,116 @@ fn strip_range_query_params(mut parsed: Url) -> Url {
     parsed
 }
 
+/// Resolves an accurate Content-Type for the proxy response while preserving concrete audio/video MIME headers.
+/// Replaces generic `application/octet-stream` / `binary/octet-stream` headers returned on YouTube HLS segments.
+pub fn resolve_stream_content_type(
+    upstream_ct: Option<&str>,
+    target_url: &Url,
+    mime_hint: Option<&str>,
+) -> HeaderValue {
+    if let Some(raw_ct) = upstream_ct {
+        let lower = raw_ct.trim().to_lowercase();
+        if !lower.is_empty()
+            && !lower.starts_with("application/octet-stream")
+            && !lower.starts_with("binary/octet-stream")
+        {
+            if let Ok(hv) = HeaderValue::from_str(raw_ct) {
+                return hv;
+            }
+        }
+    }
+
+    if let Some(hint) = mime_hint {
+        if let Ok(hv) = HeaderValue::from_str(hint) {
+            return hv;
+        }
+    }
+
+    if let Some((_, query_mime)) = target_url.query_pairs().find(|(k, _)| k == "mime") {
+        let lower_q = query_mime.trim().to_lowercase();
+        if !lower_q.is_empty()
+            && !lower_q.starts_with("application/octet-stream")
+            && !lower_q.starts_with("binary/octet-stream")
+        {
+            if let Ok(hv) = HeaderValue::from_str(&query_mime) {
+                return hv;
+            }
+        }
+    }
+
+    let path = target_url.path().to_lowercase();
+    if path.contains("/goap/") {
+        return HeaderValue::from_static("audio/aac");
+    }
+    if path.contains("/timedtext") || path.ends_with(".vtt") {
+        return HeaderValue::from_static("text/vtt; charset=utf-8");
+    }
+    if target_url
+        .query()
+        .map(|q| q.split('&').any(|pair| pair == "is=1"))
+        .unwrap_or(false)
+        || path.ends_with(".mp4")
+    {
+        return HeaderValue::from_static("video/mp4");
+    }
+    if path.contains("/govp/") || path.ends_with(".ts") {
+        return HeaderValue::from_static("video/mp2t");
+    }
+
+    HeaderValue::from_static("video/mp4")
+}
+
 async fn handle_stream(
+    method: Method,
+    state: State<ProxyState>,
+    headers: HeaderMap,
+    q: Query<StreamQuery>,
+) -> Response {
+    handle_stream_inner(method, state, headers, q, None).await
+}
+
+async fn handle_stream_ts(
+    method: Method,
+    state: State<ProxyState>,
+    headers: HeaderMap,
+    q: Query<StreamQuery>,
+) -> Response {
+    handle_stream_inner(method, state, headers, q, Some("video/mp2t")).await
+}
+
+async fn handle_stream_mp4(
+    method: Method,
+    state: State<ProxyState>,
+    headers: HeaderMap,
+    q: Query<StreamQuery>,
+) -> Response {
+    handle_stream_inner(method, state, headers, q, Some("video/mp4")).await
+}
+
+async fn handle_stream_aac(
+    method: Method,
+    state: State<ProxyState>,
+    headers: HeaderMap,
+    q: Query<StreamQuery>,
+) -> Response {
+    handle_stream_inner(method, state, headers, q, Some("audio/aac")).await
+}
+
+async fn handle_stream_vtt(
+    method: Method,
+    state: State<ProxyState>,
+    headers: HeaderMap,
+    q: Query<StreamQuery>,
+) -> Response {
+    handle_stream_inner(method, state, headers, q, Some("text/vtt; charset=utf-8")).await
+}
+
+async fn handle_stream_inner(
     method: Method,
     State(state): State<ProxyState>,
     headers: HeaderMap,
     Query(q): Query<StreamQuery>,
+    mime_hint: Option<&'static str>,
 ) -> Response {
     let Ok(parsed_url) = Url::parse(&q.url) else {
         return text_error(StatusCode::BAD_REQUEST, "Invalid url parameter".to_string());
@@ -424,16 +533,14 @@ async fn handle_stream(
     if let Some(cl) = upstream_res.headers().get(header::CONTENT_LENGTH) {
         res_headers.insert(header::CONTENT_LENGTH, cl.clone());
     }
-    if let Some(ct) = upstream_res.headers().get(header::CONTENT_TYPE) {
-        res_headers.insert(header::CONTENT_TYPE, ct.clone());
-    } else {
-        let fallback_mime = active_target_url
-            .query_pairs()
-            .find(|(k, _)| k == "mime")
-            .and_then(|(_, v)| HeaderValue::from_str(&v).ok())
-            .unwrap_or_else(|| HeaderValue::from_static("video/mp4"));
-        res_headers.insert(header::CONTENT_TYPE, fallback_mime);
-    }
+    let upstream_ct = upstream_res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok());
+    res_headers.insert(
+        header::CONTENT_TYPE,
+        resolve_stream_content_type(upstream_ct, &active_target_url, mime_hint),
+    );
 
     if method == Method::HEAD || raw_status < 200 || raw_status >= 300 {
         let mut res = Response::new(Body::empty());
@@ -454,8 +561,17 @@ async fn handle_stream(
 /// Leaves discrete HLS segments untouched when no Range header was requested.
 pub fn build_chunked_range_header(raw_range: Option<&str>, target_url: &Url) -> Option<String> {
     let path = target_url.path();
-    let is_discrete_hls_segment =
-        path.contains("/gosq/") || path.ends_with(".ts") || path.contains("/slices=");
+    let is_discrete_hls_segment = path.contains("/gosq/")
+        || path.ends_with(".ts")
+        || path.ends_with(".vtt")
+        || path.contains("/timedtext")
+        || path.contains("/slices=")
+        || path.contains("/slices%3D")
+        || path.contains("/slices%3d")
+        || target_url
+            .query()
+            .map(|q| q.split('&').any(|pair| pair == "is=1"))
+            .unwrap_or(false);
 
     let effective_range = match raw_range {
         Some(r) if !r.trim().is_empty() => r,
@@ -517,7 +633,7 @@ pub fn is_hls_playlist_url(abs_url: &str) -> bool {
     abs_url.ends_with(".m3u8") && !abs_url.contains("/videoplayback")
 }
 
-/// Rewrites every nested playlist URL to `/hls-manifest` and every media segment URL to `/stream`.
+/// Rewrites every nested playlist URL to `/hls.m3u8` and every media segment URL to typed `/stream.*` routes.
 pub fn rewrite_m3u8(
     raw_m3u8: &str,
     base_url: &str,
@@ -531,6 +647,7 @@ pub fn rewrite_m3u8(
         format!("&id={}", urlencoding::encode(video_id))
     };
     let encoded_client = urlencoding::encode(client_name);
+    let is_fmp4_playlist = raw_m3u8.contains("#EXT-X-MAP:");
 
     let base_parsed = Url::parse(base_url).ok();
 
@@ -545,12 +662,21 @@ pub fn rewrite_m3u8(
 
         if is_hls_playlist_url(&resolved) {
             format!(
-                "{proxy_base}/hls-manifest?url={}&client={encoded_client}{id_suffix}",
+                "{proxy_base}/hls.m3u8?url={}&client={encoded_client}{id_suffix}",
                 urlencoding::encode(&resolved)
             )
         } else {
+            let seg_route = if is_fmp4_playlist {
+                "/stream.mp4"
+            } else if resolved.contains("/goap/") {
+                "/stream.aac"
+            } else if resolved.contains("/timedtext") || resolved.ends_with(".vtt") {
+                "/stream.vtt"
+            } else {
+                "/stream.ts"
+            };
             format!(
-                "{proxy_base}/stream?url={}&client={encoded_client}{id_suffix}",
+                "{proxy_base}{seg_route}?url={}&client={encoded_client}{id_suffix}",
                 urlencoding::encode(&resolved)
             )
         }
@@ -620,8 +746,8 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_m3u8_distinguishes_playlist_vs_ts_segments() {
-        let master = "#EXTM3U\n#EXT-X-MEDIA:URI=\"https://manifest.googlevideo.com/api/manifest/hls_playlist/id/123/index.m3u8\",TYPE=AUDIO\nhttps://rr9.googlevideo.com/videoplayback/id/123/playlist/index.m3u8/govp/slices=0-100/gosq/0/file/seg.ts\n";
+    fn rewrite_m3u8_distinguishes_playlist_vs_typed_segments() {
+        let master = "#EXTM3U\n#EXT-X-MEDIA:URI=\"https://manifest.googlevideo.com/api/manifest/hls_playlist/id/123/index.m3u8\",TYPE=AUDIO\nhttps://rr9.googlevideo.com/videoplayback/id/123/playlist/index.m3u8/govp/slices=0-100/gosq/0/file/seg.ts\nhttps://rr9.googlevideo.com/videoplayback/id/123/playlist/index.m3u8/goap/slices=0-100/gosq/0/file/seg.ts\n";
         let out_ios = rewrite_m3u8(
             master,
             "https://manifest.googlevideo.com/api/manifest/hls_variant/index.m3u8",
@@ -629,20 +755,53 @@ mod tests {
             "IOS",
         );
 
-        assert!(out_ios.contains("URI=\"http://127.0.0.1:8989/hls-manifest?url="));
+        assert!(out_ios.contains("URI=\"http://127.0.0.1:8989/hls.m3u8?url="));
         assert!(out_ios.contains("&client=IOS&id=dQw4w9WgXcQ\""));
-        assert!(out_ios.contains("\nhttp://127.0.0.1:8989/stream?url="));
+        assert!(out_ios.contains("\nhttp://127.0.0.1:8989/stream.ts?url="));
+        assert!(out_ios.contains("\nhttp://127.0.0.1:8989/stream.aac?url="));
         assert!(out_ios.contains("&client=IOS&id=dQw4w9WgXcQ"));
 
+        let fmp4_variant = "#EXTM3U\n#EXT-X-MAP:URI=\"https://rr1.googlevideo.com/videoplayback/id/123/govp/slices=0-500/gosq/0?is=1&file=seg.ts\"\nhttps://rr1.googlevideo.com/videoplayback/id/123/govp/slices=501-1000/gosq/1/file/seg.ts\n";
         let out_vision = rewrite_m3u8(
-            master,
-            "https://manifest.googlevideo.com/api/manifest/hls_variant/index.m3u8",
+            fmp4_variant,
+            "https://manifest.googlevideo.com/api/manifest/hls_playlist/index.m3u8",
             "dQw4w9WgXcQ",
             "VISIONOS",
         );
-        assert!(out_vision.contains("URI=\"http://127.0.0.1:8989/hls-manifest?url="));
-        assert!(out_vision.contains("&client=VISIONOS&id=dQw4w9WgXcQ\""));
-        assert!(out_vision.contains("\nhttp://127.0.0.1:8989/stream?url="));
+        assert!(out_vision.contains("URI=\"http://127.0.0.1:8989/stream.mp4?url="));
+        assert!(out_vision.contains("\nhttp://127.0.0.1:8989/stream.mp4?url="));
         assert!(out_vision.contains("&client=VISIONOS&id=dQw4w9WgXcQ"));
+    }
+
+    #[test]
+    fn resolve_stream_content_type_replaces_octet_stream_and_preserves_media_mimes() {
+        let ts_url = Url::parse("https://rr1.googlevideo.com/videoplayback/id/abc/govp/slices%3D0-100/gosq/0/file/seg.ts").unwrap();
+        let aac_url = Url::parse("https://rr1.googlevideo.com/videoplayback/id/abc/goap/slices%3D0-100/gosq/0/file/seg.ts").unwrap();
+        let audio_url = Url::parse("https://rr1.googlevideo.com/videoplayback?itag=140").unwrap();
+
+        assert_eq!(
+            resolve_stream_content_type(Some("application/octet-stream"), &ts_url, Some("video/mp2t"))
+                .to_str()
+                .unwrap(),
+            "video/mp2t"
+        );
+        assert_eq!(
+            resolve_stream_content_type(Some("application/octet-stream"), &aac_url, None)
+                .to_str()
+                .unwrap(),
+            "audio/aac"
+        );
+        assert_eq!(
+            resolve_stream_content_type(Some("audio/mp4"), &audio_url, None)
+                .to_str()
+                .unwrap(),
+            "audio/mp4"
+        );
+        assert_eq!(
+            resolve_stream_content_type(Some("audio/webm"), &audio_url, None)
+                .to_str()
+                .unwrap(),
+            "audio/webm"
+        );
     }
 }

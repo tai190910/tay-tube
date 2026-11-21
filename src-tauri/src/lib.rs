@@ -15,7 +15,7 @@ use tauri::{Manager, State, WebviewWindow};
 use url::Url;
 use youtube::{
     CommentsResult, MusicAudioStreamResult, MusicShelf, MusicTrackItem, SearchVideoItem,
-    ShortsFeedResult, TayTubeVideoDetails, YouTubeService,
+    ShortsFeedResult, StreamExtractMode, TayTubeVideoDetails, YouTubeService,
 };
 
 pub struct AppState {
@@ -29,6 +29,7 @@ pub struct AppState {
 pub struct VideoDetailsOptions {
     pub target_quality: Option<i64>,
     pub prefer_hdr: Option<bool>,
+    pub mode: Option<StreamExtractMode>,
 }
 
 #[tauri::command]
@@ -39,7 +40,11 @@ async fn get_video_details(
 ) -> Result<TayTubeVideoDetails, String> {
     let target_q = options.as_ref().and_then(|o| o.target_quality);
     let pref_hdr = options.as_ref().and_then(|o| o.prefer_hdr);
-    state.yt.get_video_details(&url_or_id, target_q, pref_hdr).await
+    let mode = options.as_ref().and_then(|o| o.mode);
+    state
+        .yt
+        .get_video_details(&url_or_id, target_q, pref_hdr, mode)
+        .await
 }
 
 #[tauri::command]

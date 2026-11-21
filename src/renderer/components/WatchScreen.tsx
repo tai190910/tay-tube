@@ -68,12 +68,15 @@ export const WatchScreen: React.FC<WatchScreenProps> = ({
     setDetails(null);
 
     // Check favorite status
-    desktopAPI.isFavorite(videoId).then((fav) => {
-      if (!isCancelled) setIsFavorite(fav);
-    });
+    desktopAPI
+      .isFavorite(videoId)
+      .then((fav) => {
+        if (!isCancelled) setIsFavorite(fav);
+      })
+      .catch(() => {});
 
     desktopAPI
-      .getVideoDetails(videoId, { targetQuality: 1080, preferHdr: true })
+      .getVideoDetails(videoId, { targetQuality: 1080, preferHdr: true, mode: 'video' })
       .then((data: TayTubeVideoDetails) => {
         if (!isCancelled) {
           setDetails(data);

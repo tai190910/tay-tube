@@ -58,6 +58,43 @@ pub struct FavoriteInput {
     pub duration_sec: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredAuthAccount {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub token_type: String,
+    pub expires_at: i64,
+    pub name: String,
+    pub email: String,
+    pub avatar: String,
+    pub channel_handle: String,
+    pub page_id: String,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthAccountProfile {
+    pub name: String,
+    pub email: String,
+    pub avatar: String,
+    pub channel_handle: String,
+    pub expires_at: i64,
+}
+
+impl From<&StoredAuthAccount> for AuthAccountProfile {
+    fn from(acc: &StoredAuthAccount) -> Self {
+        Self {
+            name: acc.name.clone(),
+            email: acc.email.clone(),
+            avatar: acc.avatar.clone(),
+            channel_handle: acc.channel_handle.clone(),
+            expires_at: acc.expires_at,
+        }
+    }
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -133,6 +170,26 @@ impl AppDatabase {
                 addedAt INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_favorites_addedAt ON favorites(addedAt DESC);
+
+            CREATE TABLE IF NOT EXISTS auth_account (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                access_token TEXT NOT NULL,
+                refresh_token TEXT NOT NULL,
+                token_type TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                email TEXT NOT NULL,
+                avatar TEXT NOT NULL,
+                channel_handle TEXT NOT NULL,
+                page_id TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS app_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
             ",
         )
         .map_err(|e| format!("Failed to initialize SQLite schema: {e}"))?;
@@ -341,5 +398,123 @@ impl AppDatabase {
             .map_err(|e| e.to_string())?;
             Ok(true)
         }
+    }
+
+    pub fn get_auth_account(&self) -> Result<Option<StoredAuthAccount>, String> {
+        let conn = self.conn.lock().map_err(|_| "DB lock poisoned".to_string())?;
+        conn.query_row(
+            "SELECT access_token, refresh_token, token_type, expires_at, name, email, avatar, channel_handle, page_id, updated_at FROM auth_account WHERE id = 1",
+            [],
+            |row| {
+                Ok(StoredAuthAccount {
+                    access_token: row.get(0)?,
+                    refresh_token: row.get(1)?,
+                    token_type: row.get(2)?,
+                    expires_at: row.get(3)?,
+                    name: row.get(4)?,
+                    email: row.get(5)?,
+                    avatar: row.get(6)?,
+                    channel_handle: row.get(7)?,
+                    page_id: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())
+    }
+
+    pub fn save_auth_account(&self, account: &StoredAuthAccount) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "DB lock poisoned".to_string())?;
+        conn.execute(
+            "
+            INSERT INTO auth_account (id, access_token, refresh_token, token_type, expires_at, name, email, avatar, channel_handle, page_id, updated_at)
+            VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ON CONFLICT(id) DO UPDATE SET
+                access_token = excluded.access_token,
+                refresh_token = excluded.refresh_token,
+                token_type = excluded.token_type,
+                expires_at = excluded.expires_at,
+                name = excluded.name,
+                email = excluded.email,
+                avatar = excluded.avatar,
+                channel_handle = excluded.channel_handle,
+                page_id = excluded.page_id,
+                updated_at = excluded.updated_at;
+            ",
+            params![
+                account.access_token,
+                account.refresh_token,
+                account.token_type,
+                account.expires_at,
+                account.name,
+                account.email,
+                account.avatar,
+                account.channel_handle,
+                account.page_id,
+                account.updated_at,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn update_auth_tokens(
+        &self,
+        access_token: &str,
+        refresh_token: Option<&str>,
+        token_type: &str,
+        expires_at: i64,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "DB lock poisoned".to_string())?;
+        let now = now_ms();
+        if let Some(rt) = refresh_token {
+            conn.execute(
+                "UPDATE auth_account SET access_token = ?1, refresh_token = ?2, token_type = ?3, expires_at = ?4, updated_at = ?5 WHERE id = 1",
+                params![access_token, rt, token_type, expires_at, now],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            conn.execute(
+                "UPDATE auth_account SET access_token = ?1, token_type = ?2, expires_at = ?3, updated_at = ?4 WHERE id = 1",
+                params![access_token, token_type, expires_at, now],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub fn clear_auth_account(&self) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "DB lock poisoned".to_string())?;
+        conn.execute("DELETE FROM auth_account WHERE id = 1", [])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_meta(&self, key: &str) -> Result<Option<(String, i64)>, String> {
+        let conn = self.conn.lock().map_err(|_| "DB lock poisoned".to_string())?;
+        conn.query_row(
+            "SELECT value, updated_at FROM app_meta WHERE key = ?1",
+            params![key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())
+    }
+
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|_| "DB lock poisoned".to_string())?;
+        conn.execute(
+            "
+            INSERT INTO app_meta (key, value, updated_at)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at;
+            ",
+            params![key, value, now_ms()],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
     }
 }

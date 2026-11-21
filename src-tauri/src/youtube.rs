@@ -1,9 +1,13 @@
+use crate::auth::{
+    AuthService, TV_CLIENT_ID, TV_CLIENT_NAME, TV_CLIENT_VERSION,
+    TV_COBALT_BROWSER_VERSION, TV_OAUTH_UA,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::sync::RwLock;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use url::Url;
 
 const INNERTUBE_BASE: &str = "https://www.youtube.com/youtubei/v1/";
@@ -305,6 +309,8 @@ pub struct SearchVideoItem {
     pub duration_sec: i64,
     pub view_count_text: String,
     pub published_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percent_watched: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -337,16 +343,28 @@ pub struct IosStreamingData {
     pub formats: Vec<Value>,
 }
 
+#[derive(Debug, Clone)]
+struct TrackingSession {
+    ei: String,
+    vm: String,
+    of: String,
+    cpn: String,
+    last_pos_sec: f64,
+    record_created_at_ms: i64,
+}
+
 pub struct YouTubeService {
     http: reqwest::Client,
+    auth: Arc<AuthService>,
     visitor_data: RwLock<Option<String>>,
     player_cache: RwLock<HashMap<String, (Instant, Value)>>,
     ios_cache: RwLock<HashMap<String, (Instant, IosStreamingData)>>,
     sponsor_cache: RwLock<HashMap<String, (Instant, Vec<SponsorBlockSegment>)>>,
+    tracking_cache: RwLock<HashMap<String, TrackingSession>>,
 }
 
 impl YouTubeService {
-    pub fn new() -> Result<Self, String> {
+    pub fn new(auth: Arc<AuthService>) -> Result<Self, String> {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(12))
             .timeout(Duration::from_secs(20))
@@ -357,10 +375,12 @@ impl YouTubeService {
 
         Ok(Self {
             http,
+            auth,
             visitor_data: RwLock::new(None),
             player_cache: RwLock::new(HashMap::new()),
             ios_cache: RwLock::new(HashMap::new()),
             sponsor_cache: RwLock::new(HashMap::new()),
+            tracking_cache: RwLock::new(HashMap::new()),
         })
     }
 
@@ -1110,6 +1130,498 @@ impl YouTubeService {
             continuation_token: next_token,
         })
     }
+
+    pub fn clear_account_caches(&self) {
+        if let Ok(mut guard) = self.tracking_cache.write() {
+            guard.clear();
+        }
+    }
+
+    async fn innertube_tv_auth_request(
+        &self,
+        endpoint: &str,
+        extra_body: Value,
+    ) -> Result<Value, String> {
+        let mut auth = self
+            .auth
+            .get_valid_auth_headers()
+            .await?
+            .ok_or_else(|| "Vui lòng đăng nhập Google để sử dụng tính năng này".to_string())?;
+
+        for attempt in 0..2 {
+            let mut client_ctx = json!({
+                "clientName": TV_CLIENT_NAME,
+                "clientVersion": TV_CLIENT_VERSION,
+                "clientScreen": "WATCH",
+                "userAgent": TV_OAUTH_UA,
+                "browserName": "Cobalt",
+                "browserVersion": TV_COBALT_BROWSER_VERSION,
+                "tvAppInfo": {
+                    "appQuality": "TV_APP_QUALITY_FULL_ANIMATION",
+                    "zylonLeftNav": true
+                },
+                "webpSupport": false,
+                "animatedWebpSupport": true,
+                "hl": "vi",
+                "gl": "VN",
+                "acceptLanguage": "vi",
+                "acceptRegion": "VN",
+                "utcOffsetMinutes": 420
+            });
+
+            if let Some(ref vd) = auth.visitor_data {
+                client_ctx["visitorData"] = Value::String(vd.clone());
+            }
+
+            let mut body = match extra_body {
+                Value::Object(ref map) => Value::Object(map.clone()),
+                _ => Value::Object(serde_json::Map::new()),
+            };
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert(
+                    "context".to_string(),
+                    json!({
+                        "client": client_ctx,
+                        "user": {
+                            "enableSafetyMode": false,
+                            "lockedSafetyMode": false
+                        }
+                    }),
+                );
+                obj.entry("racyCheckOk").or_insert(Value::Bool(true));
+                obj.entry("contentCheckOk").or_insert(Value::Bool(true));
+            }
+
+            let url = format!("{INNERTUBE_BASE}{endpoint}?prettyPrint=false");
+            let mut req = self
+                .http
+                .post(&url)
+                .header("User-Agent", TV_OAUTH_UA)
+                .header("Content-Type", "application/json")
+                .header("Referer", "https://www.youtube.com/tv")
+                .header("Origin", "https://www.youtube.com")
+                .header("Accept-Language", "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7")
+                .header("X-YouTube-Client-Name", TV_CLIENT_ID)
+                .header("X-YouTube-Client-Version", TV_CLIENT_VERSION)
+                .header("Authorization", &auth.authorization);
+
+            if let Some(ref pid) = auth.page_id {
+                req = req.header("X-Goog-Pageid", pid);
+            }
+            if let Some(ref vd) = auth.visitor_data {
+                req = req.header("X-Goog-Visitor-Id", vd);
+            }
+
+            let res = req
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("Lỗi gọi InnerTube TV ({endpoint}): {e}"))?;
+
+            let status = res.status().as_u16();
+            if status == 401 && attempt == 0 {
+                if let Some(refreshed) = self
+                    .auth
+                    .force_refresh_auth_headers(&auth.authorization)
+                    .await?
+                {
+                    auth = refreshed;
+                    continue;
+                }
+            }
+
+            if !res.status().is_success() {
+                let txt = res.text().await.unwrap_or_default();
+                let preview: String = txt.chars().take(240).collect();
+                return Err(format!("InnerTube TV HTTP {status} trên {endpoint}: {preview}"));
+            }
+
+            return res
+                .json::<Value>()
+                .await
+                .map_err(|e| format!("JSON InnerTube TV không hợp lệ: {e}"));
+        }
+
+        Err(format!("Không thể xác thực yêu cầu InnerTube TV ({endpoint})"))
+    }
+
+    async fn stats_get_with_auth(&self, full_url: &str) -> Result<(), String> {
+        let mut auth = self
+            .auth
+            .get_valid_auth_headers()
+            .await?
+            .ok_or_else(|| "Chưa đăng nhập Google".to_string())?;
+
+        for attempt in 0..2 {
+            let mut req = self
+                .http
+                .get(full_url)
+                .header("User-Agent", TV_OAUTH_UA)
+                .header("Referer", "https://www.youtube.com/tv")
+                .header("Origin", "https://www.youtube.com")
+                .header("Authorization", &auth.authorization);
+
+            if let Some(ref pid) = auth.page_id {
+                req = req.header("X-Goog-Pageid", pid);
+            }
+            if let Some(ref vd) = auth.visitor_data {
+                req = req.header("X-Goog-Visitor-Id", vd);
+            }
+
+            let res = req
+                .send()
+                .await
+                .map_err(|e| format!("Lỗi đồng bộ lịch sử xem YouTube: {e}"))?;
+
+            if res.status().as_u16() == 401 && attempt == 0 {
+                if let Some(refreshed) = self
+                    .auth
+                    .force_refresh_auth_headers(&auth.authorization)
+                    .await?
+                {
+                    auth = refreshed;
+                    continue;
+                }
+            }
+
+            if !res.status().is_success() {
+                let code = res.status().as_u16();
+                return Err(format!("YouTube stats trả về HTTP {code}"));
+            }
+
+            return Ok(());
+        }
+
+        Ok(())
+    }
+
+    pub async fn get_home_videos(&self) -> Result<Vec<SearchVideoItem>, String> {
+        if self.auth.is_signed_in() {
+            if let Ok(resp) = self
+                .innertube_tv_auth_request("browse", json!({ "browseId": "default" }))
+                .await
+            {
+                let mut list = Vec::new();
+                let mut seen = HashSet::new();
+                walk_browse_videos(&resp, &mut list, &mut seen);
+                if !list.is_empty() {
+                    return Ok(list);
+                }
+            }
+        }
+        self.get_trending_videos().await
+    }
+
+    pub async fn get_subscriptions_videos(&self) -> Result<Vec<SearchVideoItem>, String> {
+        let resp = self
+            .innertube_tv_auth_request("browse", json!({ "browseId": "FEsubscriptions" }))
+            .await?;
+
+        let mut list = Vec::new();
+        let mut seen = HashSet::new();
+        walk_browse_videos(&resp, &mut list, &mut seen);
+        Ok(list)
+    }
+
+    pub async fn get_youtube_history(&self) -> Result<Vec<SearchVideoItem>, String> {
+        let resp = self
+            .innertube_tv_auth_request("browse", json!({ "browseId": "FEhistory" }))
+            .await?;
+
+        let mut list = Vec::new();
+        let mut seen = HashSet::new();
+        walk_browse_videos(&resp, &mut list, &mut seen);
+        Ok(list)
+    }
+
+    pub async fn get_watch_later_videos(&self) -> Result<Vec<SearchVideoItem>, String> {
+        let resp = self
+            .innertube_tv_auth_request("browse", json!({ "browseId": "VLWL" }))
+            .await?;
+
+        let mut list = Vec::new();
+        let mut seen = HashSet::new();
+        walk_browse_videos(&resp, &mut list, &mut seen);
+
+        if list.is_empty() {
+            if let Ok(alt) = self
+                .innertube_tv_auth_request(
+                    "browse",
+                    json!({ "browseId": "FEmy_youtube", "params": "cAc%3D" }),
+                )
+                .await
+            {
+                walk_browse_videos(&alt, &mut list, &mut seen);
+            }
+        }
+
+        Ok(list)
+    }
+
+    pub async fn add_to_watch_later(&self, video_id: &str) -> Result<bool, String> {
+        let vid = Self::extract_video_id(video_id)?;
+        let resp = self
+            .innertube_tv_auth_request(
+                "browse/edit_playlist",
+                json!({
+                    "playlistId": "WL",
+                    "actions": [{
+                        "addedVideoId": vid,
+                        "action": "ACTION_ADD_VIDEO"
+                    }]
+                }),
+            )
+            .await?;
+
+        let status = resp
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("STATUS_SUCCEEDED");
+        Ok(status == "STATUS_SUCCEEDED" || resp.get("playlistEditResults").is_some())
+    }
+
+    pub async fn remove_from_watch_later(&self, video_id: &str) -> Result<bool, String> {
+        let vid = Self::extract_video_id(video_id)?;
+        let resp = self
+            .innertube_tv_auth_request(
+                "browse/edit_playlist",
+                json!({
+                    "playlistId": "WL",
+                    "actions": [{
+                        "removedVideoId": vid,
+                        "action": "ACTION_REMOVE_VIDEO_BY_VIDEO_ID"
+                    }]
+                }),
+            )
+            .await?;
+
+        let status = resp
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("STATUS_SUCCEEDED");
+        Ok(status == "STATUS_SUCCEEDED" || resp.get("playlistEditResults").is_some())
+    }
+
+    pub async fn sync_watch_progress(
+        &self,
+        video_id: &str,
+        position_sec: f64,
+        duration_sec: f64,
+    ) -> Result<(), String> {
+        if !self.auth.is_signed_in() || duration_sec <= 0.0 || !position_sec.is_finite() {
+            return Ok(());
+        }
+
+        let vid = Self::extract_video_id(video_id)?;
+        let now = now_unix_ms();
+        let clamped_pos = position_sec.max(0.0).min(duration_sec);
+
+        const HISTORY_RENEW_MS: i64 = 30 * 60 * 1000;
+        const START_THRESHOLD_SEC: f64 = 180.0;
+
+        let existing = {
+            let guard = self.tracking_cache.read().ok();
+            guard.and_then(|m| m.get(&vid).cloned())
+        };
+
+        let mut need_new_record = false;
+        let session = if let Some(s) = existing {
+            if now.saturating_sub(s.record_created_at_ms) > HISTORY_RENEW_MS {
+                need_new_record = true;
+            }
+            s
+        } else {
+            let player_resp = self
+                .innertube_tv_auth_request(
+                    "player",
+                    json!({
+                        "videoId": vid,
+                        "contentCheckOk": true,
+                        "racyCheckOk": true
+                    }),
+                )
+                .await?;
+
+            let Some((ei, vm, of)) = extract_tracking_params(&player_resp) else {
+                return Ok(());
+            };
+            need_new_record = true;
+            TrackingSession {
+                ei,
+                vm,
+                of,
+                cpn: generate_cpn(),
+                last_pos_sec: if clamped_pos < START_THRESHOLD_SEC {
+                    0.0
+                } else {
+                    clamped_pos
+                },
+                record_created_at_ms: now,
+            }
+        };
+
+        let old_pos_sec = session.last_pos_sec.max(0.0).min(duration_sec);
+        let is_almost_watched = (duration_sec - clamped_pos) < (duration_sec * 0.05);
+
+        let len_str = format!("{duration_sec:.1}");
+        let pos_str = format!("{clamped_pos:.3}");
+        let old_str = format!("{old_pos_sec:.3}");
+
+        if is_almost_watched {
+            let playback_url = build_stats_url(
+                "https://www.youtube.com/api/stats/playback",
+                &[
+                    ("ns", "yt"),
+                    ("ver", "2"),
+                    ("final", "1"),
+                    ("docid", &vid),
+                    ("cpn", &session.cpn),
+                    ("ei", &session.ei),
+                    ("vm", &session.vm),
+                    ("of", &session.of),
+                ],
+            )?;
+            let _ = self.stats_get_with_auth(&playback_url).await;
+
+            let watchtime_url = build_stats_url(
+                "https://www.youtube.com/api/stats/watchtime",
+                &[
+                    ("ns", "yt"),
+                    ("ver", "2"),
+                    ("final", "1"),
+                    ("docid", &vid),
+                    ("st", &len_str),
+                    ("et", &len_str),
+                    ("cpn", &session.cpn),
+                    ("ei", &session.ei),
+                    ("vm", &session.vm),
+                    ("of", &session.of),
+                ],
+            )?;
+            self.stats_get_with_auth(&watchtime_url).await?;
+        } else {
+            if need_new_record {
+                let playback_url = build_stats_url(
+                    "https://www.youtube.com/api/stats/playback",
+                    &[
+                        ("ns", "yt"),
+                        ("ver", "2"),
+                        ("docid", &vid),
+                        ("len", &len_str),
+                        ("cmt", &old_str),
+                        ("cpn", &session.cpn),
+                        ("ei", &session.ei),
+                        ("vm", &session.vm),
+                        ("of", &session.of),
+                    ],
+                )?;
+                let _ = self.stats_get_with_auth(&playback_url).await;
+            }
+
+            let watchtime_url = build_stats_url(
+                "https://www.youtube.com/api/stats/watchtime",
+                &[
+                    ("ns", "yt"),
+                    ("ver", "2"),
+                    ("docid", &vid),
+                    ("len", &len_str),
+                    ("st", &old_str),
+                    ("et", &pos_str),
+                    ("cmt", &pos_str),
+                    ("cpn", &session.cpn),
+                    ("ei", &session.ei),
+                    ("vm", &session.vm),
+                    ("of", &session.of),
+                ],
+            )?;
+            self.stats_get_with_auth(&watchtime_url).await?;
+        }
+
+        if let Ok(mut guard) = self.tracking_cache.write() {
+            let updated_created_at = if need_new_record {
+                now
+            } else {
+                session.record_created_at_ms
+            };
+            guard.insert(
+                vid,
+                TrackingSession {
+                    ei: session.ei,
+                    vm: session.vm,
+                    of: session.of,
+                    cpn: session.cpn,
+                    last_pos_sec: clamped_pos,
+                    record_created_at_ms: updated_created_at,
+                },
+            );
+        }
+
+        Ok(())
+    }
+}
+
+fn now_unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn generate_cpn() -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut hasher = Sha256::new();
+    hasher.update(nanos.to_le_bytes());
+    hasher.update(std::process::id().to_le_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(16);
+    for b in digest.iter().take(16) {
+        out.push(ALPHABET[(*b as usize) % ALPHABET.len()] as char);
+    }
+    out
+}
+
+fn build_stats_url(base: &str, params: &[(&str, &str)]) -> Result<String, String> {
+    let mut parsed = Url::parse(base).map_err(|e| format!("Invalid stats URL: {e}"))?;
+    {
+        let mut pairs = parsed.query_pairs_mut();
+        for (k, v) in params {
+            if !v.is_empty() {
+                pairs.append_pair(k, v);
+            }
+        }
+    }
+    Ok(parsed.to_string())
+}
+
+fn extract_tracking_params(player_resp: &Value) -> Option<(String, String, String)> {
+    let base_url = player_resp
+        .pointer("/playbackTracking/videostatsWatchtimeUrl/baseUrl")
+        .or_else(|| player_resp.pointer("/playbackTracking/videostatsPlaybackUrl/baseUrl"))
+        .and_then(|v| v.as_str())?;
+
+    let parsed = Url::parse(base_url).ok()?;
+    let mut ei = String::new();
+    let mut vm = String::new();
+    let mut of = String::new();
+
+    for (k, v) in parsed.query_pairs() {
+        match k.as_ref() {
+            "ei" => ei = v.into_owned(),
+            "vm" => vm = v.into_owned(),
+            "of" => of = v.into_owned(),
+            _ => {}
+        }
+    }
+
+    if ei.is_empty() || vm.is_empty() || of.is_empty() {
+        None
+    } else {
+        Some((ei, vm, of))
+    }
 }
 
 fn is_valid_video_id(s: &str) -> bool {
@@ -1693,7 +2205,318 @@ fn parse_video_renderer(v: &Value) -> Option<SearchVideoItem> {
         duration_sec,
         view_count_text,
         published_text,
+        percent_watched: None,
     })
+}
+
+fn normalize_thumb_url(raw: &str) -> String {
+    if raw.starts_with("//") {
+        format!("https:{raw}")
+    } else {
+        raw.to_string()
+    }
+}
+
+fn parse_tile_renderer(tile: &Value) -> Option<SearchVideoItem> {
+    let mut id = tile
+        .pointer("/onSelectCommand/watchEndpoint/videoId")
+        .or_else(|| tile.pointer("/onSelectCommand/reelWatchEndpoint/videoId"))
+        .or_else(|| tile.pointer("/onSelectCommand/showMenuCommand/contentId"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if id.is_empty() {
+        if let Some(items) = tile
+            .pointer("/menu/menuRenderer/items")
+            .or_else(|| tile.pointer("/onLongPressCommand/showMenuCommand/menu/menuRenderer/items"))
+            .and_then(|v| v.as_array())
+        {
+            for item in items {
+                if let Some(vid) = item
+                    .pointer("/menuNavigationItemRenderer/navigationEndpoint/watchEndpoint/videoId")
+                    .and_then(|v| v.as_str())
+                {
+                    if !vid.is_empty() {
+                        id = vid.to_string();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if !is_valid_video_id(&id) {
+        return None;
+    }
+
+    let meta = tile.pointer("/metadata/tileMetadataRenderer");
+    let header = tile
+        .pointer("/header/tileHeaderRenderer")
+        .or_else(|| tile.pointer("/header/trackTileHeaderRenderer"));
+
+    let mut title = extract_runs_or_simple(meta.and_then(|m| m.get("title")));
+    if title.is_empty() {
+        title = extract_runs_or_simple(header.and_then(|h| h.get("title")));
+    }
+    if title.is_empty() {
+        return None;
+    }
+
+    let mut lines: Vec<Vec<String>> = Vec::new();
+    if let Some(raw_lines) = meta
+        .and_then(|m| m.get("lines"))
+        .and_then(|v| v.as_array())
+    {
+        for line in raw_lines {
+            let mut parts = Vec::new();
+            if let Some(items) = line
+                .pointer("/lineRenderer/items")
+                .and_then(|v| v.as_array())
+            {
+                for it in items {
+                    let txt = extract_runs_or_simple(it.pointer("/lineItemRenderer/text"));
+                    if !txt.trim().is_empty() {
+                        parts.push(txt.trim().to_string());
+                    }
+                }
+            }
+            if !parts.is_empty() {
+                lines.push(parts);
+            }
+        }
+    }
+
+    let (channel, view_count_text, published_text) = if lines.len() >= 2 {
+        let ch = lines[0].join(" • ");
+        let vc = lines[1].first().cloned().unwrap_or_default();
+        let pub_t = if lines[1].len() > 1 {
+            Some(lines[1][1..].join(" • "))
+        } else {
+            None
+        };
+        (ch, vc, pub_t)
+    } else if lines.len() == 1 {
+        let ch = lines[0].first().cloned().unwrap_or_default();
+        let vc = lines[0].get(1).cloned().unwrap_or_default();
+        let pub_t = if lines[0].len() > 2 {
+            Some(lines[0][2..].join(" • "))
+        } else {
+            None
+        };
+        (ch, vc, pub_t)
+    } else {
+        (String::new(), String::new(), None)
+    };
+
+    let channel_id = tile
+        .pointer("/onSelectCommand/browseEndpoint/browseId")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string());
+
+    let thumbnail = header
+        .and_then(|h| h.pointer("/thumbnail/thumbnails"))
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.last())
+        .and_then(|t| t.get("url"))
+        .and_then(|s| s.as_str())
+        .map(normalize_thumb_url)
+        .unwrap_or_else(|| format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg"));
+
+    let mut duration_text = String::new();
+    let mut percent_watched: Option<i64> = None;
+
+    if let Some(overlays) = header
+        .and_then(|h| h.get("thumbnailOverlays"))
+        .and_then(|v| v.as_array())
+    {
+        for ov in overlays {
+            if duration_text.is_empty() {
+                if let Some(time_renderer) = ov.get("thumbnailOverlayTimeStatusRenderer") {
+                    let txt = extract_runs_or_simple(time_renderer.get("text"));
+                    if !txt.trim().is_empty() {
+                        duration_text = txt.trim().to_string();
+                    } else if time_renderer.get("style").and_then(|v| v.as_str()) == Some("LIVE") {
+                        duration_text = "LIVE".to_string();
+                    }
+                }
+            }
+            if percent_watched.is_none() {
+                if let Some(pct) = ov
+                    .pointer("/thumbnailOverlayResumePlaybackRenderer/percentDurationWatched")
+                    .and_then(|v| v.as_i64())
+                {
+                    if pct > 0 {
+                        percent_watched = Some(pct.min(100));
+                    }
+                }
+            }
+        }
+    }
+
+    let duration_sec = parse_duration_to_sec(&duration_text);
+
+    Some(SearchVideoItem {
+        id,
+        title,
+        channel,
+        channel_id,
+        thumbnail,
+        duration_text,
+        duration_sec,
+        view_count_text,
+        published_text,
+        percent_watched,
+    })
+}
+
+fn parse_standard_video_card(v: &Value) -> Option<SearchVideoItem> {
+    let mut item = parse_video_renderer(v)?;
+    item.thumbnail = normalize_thumb_url(&item.thumbnail);
+    if item.channel.is_empty() {
+        item.channel = extract_runs_or_simple(v.get("shortBylineText"));
+    }
+    if item.duration_text.is_empty() {
+        if let Some(overlays) = v.get("thumbnailOverlays").and_then(|o| o.as_array()) {
+            for ov in overlays {
+                if let Some(ts) = ov.pointer("/thumbnailOverlayTimeStatusRenderer/text") {
+                    let txt = extract_runs_or_simple(Some(ts));
+                    if !txt.trim().is_empty() {
+                        item.duration_text = txt.trim().to_string();
+                        item.duration_sec = parse_duration_to_sec(&item.duration_text);
+                    }
+                }
+                if let Some(pct) = ov
+                    .pointer("/thumbnailOverlayResumePlaybackRenderer/percentDurationWatched")
+                    .and_then(|p| p.as_i64())
+                {
+                    if pct > 0 {
+                        item.percent_watched = Some(pct.min(100));
+                    }
+                }
+            }
+        }
+    } else if let Some(overlays) = v.get("thumbnailOverlays").and_then(|o| o.as_array()) {
+        for ov in overlays {
+            if let Some(pct) = ov
+                .pointer("/thumbnailOverlayResumePlaybackRenderer/percentDurationWatched")
+                .and_then(|p| p.as_i64())
+            {
+                if pct > 0 {
+                    item.percent_watched = Some(pct.min(100));
+                    break;
+                }
+            }
+        }
+    }
+    Some(item)
+}
+
+fn parse_lockup_video(map: &serde_json::Map<String, Value>, val: &Value) -> Option<SearchVideoItem> {
+    if map.get("contentType").and_then(|x| x.as_str()) != Some("LOCKUP_CONTENT_TYPE_VIDEO")
+        || !map.contains_key("lockupViewModel")
+    {
+        return None;
+    }
+    let id = map.get("contentId").and_then(|x| x.as_str())?.to_string();
+    if !is_valid_video_id(&id) {
+        return None;
+    }
+    let title = val
+        .pointer("/metadata/lockupMetadataViewModel/title/content")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
+    if title.is_empty() {
+        return None;
+    }
+    let channel = val
+        .pointer("/metadata/lockupMetadataViewModel/metadata/contentMetadataViewModel/metadataRows/0/metadataParts/0/text/content")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
+    let thumbnail = val
+        .pointer("/contentImage/thumbnailViewModel/image/sources")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.last())
+        .and_then(|s| s.get("url"))
+        .and_then(|s| s.as_str())
+        .map(normalize_thumb_url)
+        .unwrap_or_else(|| format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg"));
+
+    Some(SearchVideoItem {
+        id,
+        title,
+        channel,
+        channel_id: None,
+        thumbnail,
+        duration_text: String::new(),
+        duration_sec: 0,
+        view_count_text: String::new(),
+        published_text: None,
+        percent_watched: None,
+    })
+}
+
+fn walk_browse_videos(val: &Value, list: &mut Vec<SearchVideoItem>, seen: &mut HashSet<String>) {
+    match val {
+        Value::Object(map) => {
+            if let Some(tabs) = map.get("tabs").and_then(|t| t.as_array()) {
+                // On multi-tab views (e.g. TV Subscriptions with channel sidebar tabs),
+                // prefer only the selected tab or the first tab with content so channel tabs don't mix.
+                let selected_tab = tabs
+                    .iter()
+                    .find(|t| t.pointer("/tabRenderer/selected").and_then(|v| v.as_bool()) == Some(true))
+                    .or_else(|| tabs.first());
+                if let Some(tab) = selected_tab {
+                    walk_browse_videos(tab, list, seen);
+                }
+                return;
+            }
+
+            if let Some(tile) = map.get("tileRenderer") {
+                if let Some(item) = parse_tile_renderer(tile) {
+                    if seen.insert(item.id.clone()) {
+                        list.push(item);
+                    }
+                }
+                return;
+            }
+
+            for key in [
+                "videoRenderer",
+                "gridVideoRenderer",
+                "playlistVideoRenderer",
+                "compactVideoRenderer",
+            ] {
+                if let Some(vr) = map.get(key) {
+                    if let Some(item) = parse_standard_video_card(vr) {
+                        if seen.insert(item.id.clone()) {
+                            list.push(item);
+                        }
+                    }
+                    return;
+                }
+            }
+
+            if let Some(item) = parse_lockup_video(map, val) {
+                if seen.insert(item.id.clone()) {
+                    list.push(item);
+                }
+                return;
+            }
+
+            for child in map.values() {
+                walk_browse_videos(child, list, seen);
+            }
+        }
+        Value::Array(arr) => {
+            for child in arr {
+                walk_browse_videos(child, list, seen);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn walk_trending(val: &Value, list: &mut Vec<SearchVideoItem>, seen: &mut HashSet<String>) {

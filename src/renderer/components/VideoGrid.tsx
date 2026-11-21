@@ -12,6 +12,7 @@ interface VideoGridItem {
   durationSec?: number;
   viewCountText?: string;
   publishedText?: string;
+  percentWatched?: number;
 }
 
 interface VideoGridProps {
@@ -21,11 +22,16 @@ interface VideoGridProps {
   loading?: boolean;
   resumes?: Record<string, ResumeItemUI>;
   favoritesSet?: Set<string>;
+  watchLaterSet?: Set<string>;
   onSelectVideo: (id: string) => void;
   onToggleFavorite?: (item: VideoGridItem) => void;
+  onToggleWatchLater?: (item: VideoGridItem) => void;
   onClearHistory?: () => void;
   onDeleteHistoryItem?: (id: string) => void;
   showClearHistory?: boolean;
+  emptyTitle?: string;
+  emptySubtitle?: string;
+  emptyAction?: { label: string; onClick: () => void };
 }
 
 export const VideoGrid: React.FC<VideoGridProps> = ({
@@ -35,11 +41,16 @@ export const VideoGrid: React.FC<VideoGridProps> = ({
   loading = false,
   resumes = {},
   favoritesSet = new Set(),
+  watchLaterSet = new Set(),
   onSelectVideo,
   onToggleFavorite,
+  onToggleWatchLater,
   onClearHistory,
   onDeleteHistoryItem,
   showClearHistory = false,
+  emptyTitle = 'Chưa có video nào ở đây',
+  emptySubtitle = 'Hãy thử tìm kiếm từ khóa hoặc khám phá video thịnh hành.',
+  emptyAction,
 }) => {
   return (
     <div className="h-full w-full overflow-y-auto p-4 lg:p-6 space-y-6">
@@ -75,9 +86,18 @@ export const VideoGrid: React.FC<VideoGridProps> = ({
 
       {/* Empty State */}
       {!loading && items.length === 0 && (
-        <div className="flex flex-col items-center justify-center py-20 text-center space-y-2">
-          <p className="text-base font-semibold text-white">Chưa có video nào ở đây</p>
-          <p className="text-xs text-yt-subtext">Hãy thử tìm kiếm từ khóa hoặc khám phá video thịnh hành.</p>
+        <div className="flex flex-col items-center justify-center py-20 text-center space-y-3">
+          <p className="text-base font-semibold text-white">{emptyTitle}</p>
+          <p className="text-xs text-yt-subtext max-w-md">{emptySubtitle}</p>
+          {emptyAction && (
+            <button
+              type="button"
+              onClick={emptyAction.onClick}
+              className="mt-2 px-4 py-2 min-h-[44px] bg-yt-red hover:bg-red-700 text-white text-xs font-semibold rounded-[8px] transition-colors"
+            >
+              {emptyAction.label}
+            </button>
+          )}
         </div>
       )}
 
@@ -95,13 +115,23 @@ export const VideoGrid: React.FC<VideoGridProps> = ({
               viewCountText={item.viewCountText}
               publishedText={item.publishedText}
               resumeInfo={resumes[item.id]}
+              percentWatched={item.percentWatched}
               isFavorite={favoritesSet.has(item.id)}
+              isWatchLater={watchLaterSet.has(item.id)}
               onSelect={onSelectVideo}
               onToggleFavorite={
                 onToggleFavorite
                   ? (e) => {
                       e.stopPropagation();
                       onToggleFavorite(item);
+                    }
+                  : undefined
+              }
+              onToggleWatchLater={
+                onToggleWatchLater
+                  ? (e) => {
+                      e.stopPropagation();
+                      onToggleWatchLater(item);
                     }
                   : undefined
               }

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Heart, Trash2 } from 'lucide-react';
+import { Heart, Trash2, Clock, Check } from 'lucide-react';
 import { ResumeItemUI } from '../types.js';
 
 interface VideoCardProps {
@@ -11,9 +11,12 @@ interface VideoCardProps {
   viewCountText?: string;
   publishedText?: string;
   resumeInfo?: ResumeItemUI;
+  percentWatched?: number;
   isFavorite?: boolean;
+  isWatchLater?: boolean;
   onSelect: (id: string) => void;
   onToggleFavorite?: (e: React.MouseEvent) => void;
+  onToggleWatchLater?: (e: React.MouseEvent) => void;
   onDeleteHistory?: (e: React.MouseEvent) => void;
 }
 
@@ -26,9 +29,12 @@ export const VideoCard: React.FC<VideoCardProps> = ({
   viewCountText,
   publishedText,
   resumeInfo,
+  percentWatched,
   isFavorite,
+  isWatchLater,
   onSelect,
   onToggleFavorite,
+  onToggleWatchLater,
   onDeleteHistory,
 }) => {
   let progressPercent = 0;
@@ -37,6 +43,8 @@ export const VideoCard: React.FC<VideoCardProps> = ({
       100,
       Math.max(0, (resumeInfo.positionMs / resumeInfo.durationMs) * 100)
     );
+  } else if (percentWatched && percentWatched > 0) {
+    progressPercent = Math.min(100, Math.max(0, percentWatched));
   }
 
   return (
@@ -75,6 +83,24 @@ export const VideoCard: React.FC<VideoCardProps> = ({
 
         {/* Quick action buttons on hover */}
         <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity duration-150 flex space-x-1">
+          {onToggleWatchLater && (
+            <button
+              type="button"
+              onClick={onToggleWatchLater}
+              className={`p-1.5 rounded-[8px] transition-colors ${
+                isWatchLater
+                  ? 'bg-emerald-600 text-white'
+                  : 'bg-black/80 hover:bg-black text-white'
+              }`}
+              title={isWatchLater ? 'Xóa khỏi Xem sau' : 'Thêm vào Xem sau'}
+            >
+              {isWatchLater ? (
+                <Check className="w-3.5 h-3.5" />
+              ) : (
+                <Clock className="w-3.5 h-3.5" />
+              )}
+            </button>
+          )}
           {onToggleFavorite && (
             <button
               type="button"

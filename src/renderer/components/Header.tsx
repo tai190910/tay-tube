@@ -1,12 +1,16 @@
-import React from 'react';
-import { Search, Minus, Square, X, Tv } from 'lucide-react';
+import React, { useState } from 'react';
+import { Search, Minus, Square, X, Tv, LogIn, LogOut } from 'lucide-react';
 import { desktopAPI } from '../api.js';
+import { AuthAccountProfile } from '../types.js';
 
 interface HeaderProps {
   searchTerm: string;
   onSearchTermChange: (value: string) => void;
   onSearch: (query: string) => void;
   onGoHome: () => void;
+  account: AuthAccountProfile | null;
+  onOpenSignIn: () => void;
+  onSignOut: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -14,7 +18,15 @@ export const Header: React.FC<HeaderProps> = ({
   onSearchTermChange,
   onSearch,
   onGoHome,
+  account,
+  onOpenSignIn,
+  onSignOut,
 }) => {
+  const [avatarError, setAvatarError] = useState<boolean>(false);
+
+  React.useEffect(() => {
+    setAvatarError(false);
+  }, [account?.avatar]);
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (searchTerm.trim()) {
@@ -81,8 +93,52 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       </form>
 
-      {/* Window Controls */}
-      <div className="flex items-center space-x-1 app-no-drag">
+      {/* Account & Window Controls */}
+      <div className="flex items-center space-x-2 app-no-drag">
+        {account ? (
+          <div className="flex items-center space-x-2 bg-yt-card border border-yt-border rounded-[8px] pl-2 pr-1 py-1">
+            {account.avatar && !avatarError ? (
+              <img
+                src={account.avatar}
+                alt={account.name}
+                onError={() => setAvatarError(true)}
+                className="w-6 h-6 rounded-full object-cover flex-shrink-0"
+              />
+            ) : (
+              <div className="w-6 h-6 rounded-full bg-yt-red flex items-center justify-center text-[11px] font-bold text-white flex-shrink-0">
+                {(account.name || 'U').charAt(0).toUpperCase()}
+              </div>
+            )}
+            <span
+              className="text-xs font-medium text-white max-w-[130px] truncate"
+              title={account.email ? `${account.name} (${account.email})` : account.name}
+            >
+              {account.name}
+            </span>
+            <button
+              type="button"
+              onClick={onSignOut}
+              className="flex items-center space-x-1 px-2 py-1 rounded-[6px] text-[11px] font-semibold text-yt-subtext hover:text-white hover:bg-red-600/80 transition-colors duration-150"
+              title="Đăng xuất tài khoản Google"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Đăng xuất</span>
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={onOpenSignIn}
+            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-[8px] bg-yt-card hover:bg-yt-hover border border-white/10 text-xs font-semibold text-white transition-colors duration-150"
+            title="Đăng nhập tài khoản Google để đồng bộ Kênh đăng ký, Lịch sử và Xem sau"
+          >
+            <LogIn className="w-3.5 h-3.5 text-yt-red" />
+            <span>Đăng nhập Google</span>
+          </button>
+        )}
+
+        <div className="w-px h-5 bg-yt-border mx-1" />
+
         <button
           type="button"
           onClick={handleMinimize}

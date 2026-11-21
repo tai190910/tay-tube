@@ -1,6 +1,9 @@
 import { invoke } from '@tauri-apps/api/core';
 import {
+  AuthAccountProfile,
   CommentsResult,
+  DeviceAuthPollResult,
+  DeviceAuthStartResult,
   FavoriteItemUI,
   HistoryItemUI,
   ResumeItemUI,
@@ -9,7 +12,25 @@ import {
 } from './types.js';
 
 export const desktopAPI = {
-  // Video Core APIs
+  // Auth (Google Device OAuth2 + Token Refresh)
+  getAuthAccount: (): Promise<AuthAccountProfile | null> =>
+    invoke<AuthAccountProfile | null>('auth_get_account'),
+
+  startDeviceAuth: (): Promise<DeviceAuthStartResult> =>
+    invoke<DeviceAuthStartResult>('auth_start_device'),
+
+  pollDeviceAuth: (deviceCode: string): Promise<DeviceAuthPollResult> =>
+    invoke<DeviceAuthPollResult>('auth_poll_device', { deviceCode }),
+
+  refreshAuthToken: (): Promise<AuthAccountProfile> =>
+    invoke<AuthAccountProfile>('auth_refresh_token'),
+
+  signOut: (): Promise<void> => invoke<void>('auth_sign_out'),
+
+  openExternalUrl: (url: string): Promise<void> =>
+    invoke<void>('open_external_url', { url }),
+
+  // Video Core & Authenticated InnerTube APIs
   getVideoDetails: (
     urlOrId: string,
     options?: { targetQuality?: number; preferHdr?: boolean }
@@ -21,6 +42,31 @@ export const desktopAPI = {
 
   getTrendingVideos: (): Promise<VideoItemUI[]> =>
     invoke<VideoItemUI[]>('get_trending_videos'),
+
+  getHomeVideos: (): Promise<VideoItemUI[]> =>
+    invoke<VideoItemUI[]>('get_home_videos'),
+
+  getSubscriptionsVideos: (): Promise<VideoItemUI[]> =>
+    invoke<VideoItemUI[]>('get_subscriptions_videos'),
+
+  getYouTubeHistory: (): Promise<VideoItemUI[]> =>
+    invoke<VideoItemUI[]>('get_youtube_history'),
+
+  getWatchLaterVideos: (): Promise<VideoItemUI[]> =>
+    invoke<VideoItemUI[]>('get_watch_later_videos'),
+
+  addToWatchLater: (videoId: string): Promise<boolean> =>
+    invoke<boolean>('add_to_watch_later', { videoId }),
+
+  removeFromWatchLater: (videoId: string): Promise<boolean> =>
+    invoke<boolean>('remove_from_watch_later', { videoId }),
+
+  syncWatchProgress: (
+    videoId: string,
+    positionSec: number,
+    durationSec: number
+  ): Promise<void> =>
+    invoke<void>('sync_watch_progress', { videoId, positionSec, durationSec }),
 
   getVideoComments: (videoId: string): Promise<CommentsResult> =>
     invoke<CommentsResult>('get_video_comments', { videoId }),

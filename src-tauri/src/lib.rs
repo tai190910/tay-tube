@@ -1,16 +1,23 @@
+pub mod auth;
 pub mod db;
 pub mod proxy;
 pub mod youtube;
 
-use db::{resolve_database_dir, AppDatabase, FavoriteInput, FavoriteItem, HistoryInput, HistoryItem, ResumeItem};
+use auth::{AuthService, DeviceAuthPollResult, DeviceAuthStartResult};
+use db::{
+    resolve_database_dir, AppDatabase, AuthAccountProfile, FavoriteInput, FavoriteItem,
+    HistoryInput, HistoryItem, ResumeItem,
+};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::{Manager, State, WebviewWindow};
+use url::Url;
 use youtube::{CommentsResult, SearchVideoItem, TayTubeVideoDetails, YouTubeService};
 
 pub struct AppState {
     pub db: Arc<AppDatabase>,
+    pub auth: Arc<AuthService>,
     pub yt: Arc<YouTubeService>,
 }
 
@@ -146,6 +153,135 @@ fn window_is_fullscreen(window: WebviewWindow) -> Result<bool, String> {
     window.is_fullscreen().map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn auth_get_account(state: State<'_, AppState>) -> Result<Option<AuthAccountProfile>, String> {
+    state.auth.get_account_profile()
+}
+
+#[tauri::command]
+async fn auth_start_device(state: State<'_, AppState>) -> Result<DeviceAuthStartResult, String> {
+    state.auth.start_device_auth().await
+}
+
+#[tauri::command]
+async fn auth_poll_device(
+    state: State<'_, AppState>,
+    device_code: String,
+) -> Result<DeviceAuthPollResult, String> {
+    state.auth.poll_device_auth(&device_code).await
+}
+
+#[tauri::command]
+async fn auth_refresh_token(state: State<'_, AppState>) -> Result<AuthAccountProfile, String> {
+    state.auth.refresh_access_token().await
+}
+
+#[tauri::command]
+fn auth_sign_out(state: State<'_, AppState>) -> Result<(), String> {
+    state.yt.clear_account_caches();
+    state.auth.sign_out()
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let parsed = Url::parse(url.trim()).map_err(|e| format!("URL không hợp lệ: {e}"))?;
+    if parsed.scheme() != "https" {
+        return Err("Chỉ cho phép mở liên kết HTTPS".to_string());
+    }
+    let host = parsed.host_str().unwrap_or("");
+    let path = parsed.path();
+    let allowed = ((host == "www.google.com" || host == "google.com") && path.starts_with("/device"))
+        || ((host == "yt.be" || host == "www.youtube.com" || host == "youtube.com")
+            && (path.starts_with("/activate") || path.starts_with("/qr/activate")));
+    if !allowed {
+        return Err("Liên kết không nằm trong danh sách trang kích hoạt Google/YouTube".to_string());
+    }
+
+    let target = parsed.to_string();
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("rundll32.exe")
+            .args(["url.dll,FileProtocolHandler", &target])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("Không thể mở trình duyệt ngoài: {e}"))?;
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&target)
+            .spawn()
+            .map_err(|e| format!("Không thể mở trình duyệt ngoài: {e}"))?;
+        return Ok(());
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&target)
+            .spawn()
+            .map_err(|e| format!("Không thể mở trình duyệt ngoài: {e}"))?;
+        return Ok(());
+    }
+}
+
+#[tauri::command]
+async fn get_home_videos(state: State<'_, AppState>) -> Result<Vec<SearchVideoItem>, String> {
+    state.yt.get_home_videos().await
+}
+
+#[tauri::command]
+async fn get_subscriptions_videos(
+    state: State<'_, AppState>,
+) -> Result<Vec<SearchVideoItem>, String> {
+    state.yt.get_subscriptions_videos().await
+}
+
+#[tauri::command]
+async fn get_youtube_history(
+    state: State<'_, AppState>,
+) -> Result<Vec<SearchVideoItem>, String> {
+    state.yt.get_youtube_history().await
+}
+
+#[tauri::command]
+async fn get_watch_later_videos(
+    state: State<'_, AppState>,
+) -> Result<Vec<SearchVideoItem>, String> {
+    state.yt.get_watch_later_videos().await
+}
+
+#[tauri::command]
+async fn add_to_watch_later(
+    state: State<'_, AppState>,
+    video_id: String,
+) -> Result<bool, String> {
+    state.yt.add_to_watch_later(&video_id).await
+}
+
+#[tauri::command]
+async fn remove_from_watch_later(
+    state: State<'_, AppState>,
+    video_id: String,
+) -> Result<bool, String> {
+    state.yt.remove_from_watch_later(&video_id).await
+}
+
+#[tauri::command]
+async fn sync_watch_progress(
+    state: State<'_, AppState>,
+    video_id: String,
+    position_sec: f64,
+    duration_sec: f64,
+) -> Result<(), String> {
+    state
+        .yt
+        .sync_watch_progress(&video_id, position_sec, duration_sec)
+        .await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -157,8 +293,13 @@ pub fn run() {
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
             );
 
+            let auth_service = Arc::new(
+                AuthService::new(Arc::clone(&database))
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
+            );
+
             let yt_service = Arc::new(
-                YouTubeService::new()
+                YouTubeService::new(Arc::clone(&auth_service))
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
             );
 
@@ -169,6 +310,7 @@ pub fn run() {
 
             app.manage(AppState {
                 db: database,
+                auth: auth_service,
                 yt: yt_service,
             });
 
@@ -179,6 +321,19 @@ pub fn run() {
             search_videos,
             get_trending_videos,
             get_video_comments,
+            get_home_videos,
+            get_subscriptions_videos,
+            get_youtube_history,
+            get_watch_later_videos,
+            add_to_watch_later,
+            remove_from_watch_later,
+            sync_watch_progress,
+            auth_get_account,
+            auth_start_device,
+            auth_poll_device,
+            auth_refresh_token,
+            auth_sign_out,
+            open_external_url,
             db_get_history,
             db_add_to_history,
             db_clear_history,

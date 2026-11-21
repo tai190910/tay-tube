@@ -14,8 +14,8 @@ Tại trang Releases, bạn có thể lựa chọn 1 trong 2 phiên bản phù h
 
 | Tệp cài đặt (`.exe`) | Phiên bản | Mô tả & Cách sử dụng |
 | :--- | :--- | :--- |
-| **`Tay-Tube-PC-Setup-1.0.0.exe`** | **Bản cài đặt đầy đủ** *(Khuyên dùng)* | Tự động cài đặt vào hệ thống Windows, tự tạo biểu tượng shortcut ngoài màn hình Desktop và trong Start Menu để tiện mở ứng dụng hàng ngày. |
-| **`Tay-Tube-PC-1.0.0-Portable.exe`** | **Bản Portable** *(Chạy ngay)* | Không cần cài đặt. Tải về nhấp đúp chuột là xem phim được ngay, có thể copy vào USB để mang theo và sử dụng trên nhiều máy tính khác nhau. |
+| **`Tay-Tube-PC-Setup-1.1.0.exe`** | **Bản cài đặt đầy đủ** *(Khuyên dùng)* | Tự động cài đặt vào hệ thống Windows, tự tạo biểu tượng shortcut ngoài màn hình Desktop và trong Start Menu để tiện mở ứng dụng hàng ngày. |
+| **`Tay-Tube-PC-1.1.0-Portable.exe`** | **Bản Portable** *(Chạy ngay)* | Không cần cài đặt. Tải về nhấp đúp chuột là xem phim được ngay, có thể copy vào USB để mang theo và sử dụng trên nhiều máy tính khác nhau. |
 
 > [!NOTE]
 > ### 🛡️ Lưu ý về cảnh báo bảo vệ của Windows (SmartScreen)
@@ -35,7 +35,8 @@ Tại trang Releases, bạn có thể lựa chọn 1 trong 2 phiên bản phù h
 - 🎞️ **Phát & Tua video siêu dài tức thì (Instant Seeking):** Tích hợp cơ chế **Chunked Range Proxy** chia nhỏ dữ liệu truyền tải theo từng phân đoạn thông minh, giúp tua (scrubbing) mượt mà ngay cả trên các video dài hàng chục tiếng đồng hồ (19h+) mà không gây tràn RAM hay đứng hình.
 - 🎥 **Giao diện Cinema Dark Mode thông minh:** Tự động ẩn thanh điều khiển và con trỏ chuột sau vài giây không thao tác để tối ưu không gian hiển thị, không làm ảnh hưởng đến trải nghiệm xem phim.
 - ⚡ **Tối ưu phần cứng tầm trung & văn phòng:** Giảm thiểu tối đa các hiệu ứng làm mờ (blur) ngốn GPU, đảm bảo hoạt động mát mẻ, ổn định trên các cấu hình phổ thông.
-- 💾 **Lưu trữ cục bộ an toàn (Offline):** Toàn bộ lịch sử xem phim, kênh/video yêu thích được lưu trữ cục bộ ngay trên máy thông qua SQLite, không cần đăng nhập tài khoản.
+- 🔐 **Đăng nhập tài khoản Google (Device OAuth):** Liên kết tài khoản an toàn qua `google.com/device` để đồng bộ **Lịch sử xem (Watch History)**, **Xem sau (Watch Later)** và **Kênh đăng ký (Subscriptions)** ngay trên ứng dụng.
+- 💾 **Lưu trữ cục bộ an toàn (Offline):** Toàn bộ lịch sử xem phim, tiến độ xem dở và video yêu thích được lưu trữ cục bộ ngay trên máy thông qua SQLite, vẫn dùng mượt mà khi chưa đăng nhập.
 
 ---
 
@@ -71,5 +72,12 @@ Dành cho những ai muốn tự đóng gói từ mã nguồn hoặc tham gia ph
    npm run build:release
    ```
    Lệnh này biên dịch giao diện, build ứng dụng **Tauri v2 + Rust** ở chế độ release và tự động xuất cả 2 tệp vào thư mục `release/`:
-   - `release/Tay-Tube-PC-Setup-1.0.0.exe` (bộ cài đặt NSIS)
-   - `release/Tay-Tube-PC-1.0.0-Portable.exe` (bản chạy ngay không cần cài đặt)
+   - `release/Tay-Tube-PC-Setup-1.1.0.exe` (bộ cài đặt NSIS)
+   - `release/Tay-Tube-PC-1.1.0-Portable.exe` (bản chạy ngay không cần cài đặt)
+
+---
+
+## 🙏 Ghi nhận & Tri ân (Credits)
+
+- **[MeeTube / SmartTube](https://github.com/yuliskov/SmartTube):** Tham khảo cơ chế xác thực Google Device OAuth2, trích xuất thông số TV client động và gọi các endpoint InnerTube (`FEhistory`, `VLWL`, `FEsubscriptions`, đồng bộ tiến độ xem).
+- **[YTXTube](https://github.com/Koustubh12345/YTXTube/):** Dự án nền tảng ban đầu truyền cảm hứng cho kiến trúc trích xuất luồng phát và tối ưu trải nghiệm xem video YouTube.

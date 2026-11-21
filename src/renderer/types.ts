@@ -114,6 +114,29 @@ export interface VideoItemUI {
   durationSec?: number;
   viewCountText?: string;
   publishedText?: string;
+  percentWatched?: number;
+}
+
+export interface AuthAccountProfile {
+  name: string;
+  email: string;
+  avatar: string;
+  channelHandle: string;
+  expiresAt: number;
+}
+
+export interface DeviceAuthStartResult {
+  deviceCode: string;
+  userCode: string;
+  verificationUrl: string;
+  intervalSec: number;
+  expiresInSec: number;
+}
+
+export interface DeviceAuthPollResult {
+  status: 'pending' | 'slow_down' | 'authorized' | 'expired' | 'denied' | 'error' | string;
+  account?: AuthAccountProfile | null;
+  error?: string | null;
 }
 
 export interface HistoryItemUI {

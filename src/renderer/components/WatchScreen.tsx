@@ -1,9 +1,20 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Heart, ThumbsUp, Eye, Calendar, ChevronDown, ChevronUp, ArrowLeft } from 'lucide-react';
+import {
+  Heart,
+  Clock,
+  Check,
+  ChevronDown,
+  ChevronUp,
+  ArrowLeft,
+} from 'lucide-react';
 import { AvSyncPlayer } from './AvSyncPlayer.js';
 import { CommentsList } from './CommentsList.js';
 import { desktopAPI } from '../api.js';
-import { CommentUI, RelatedVideoItem, TayTubeVideoDetails } from '../types.js';
+import {
+  CommentUI,
+  TayTubeVideoDetails,
+  VideoItemUI,
+} from '../types.js';
 
 interface WatchScreenProps {
   videoId: string;
@@ -11,6 +22,10 @@ interface WatchScreenProps {
   onBack: () => void;
   onSelectRelated: (id: string) => void;
   onRegisterCleanup?: (cleanupFn: () => void) => void;
+  isSignedIn?: boolean;
+  isWatchLater?: boolean;
+  onToggleWatchLater?: (item: VideoItemUI) => Promise<void> | void;
+  onOpenSignIn?: () => void;
 }
 
 export const WatchScreen: React.FC<WatchScreenProps> = ({
@@ -19,6 +34,10 @@ export const WatchScreen: React.FC<WatchScreenProps> = ({
   onBack,
   onSelectRelated,
   onRegisterCleanup,
+  isSignedIn = false,
+  isWatchLater = false,
+  onToggleWatchLater,
+  onOpenSignIn,
 }) => {
   const [details, setDetails] = useState<TayTubeVideoDetails | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -99,7 +118,7 @@ export const WatchScreen: React.FC<WatchScreenProps> = ({
     }
   }, [videoId, activeTab, comments.length]);
 
-  // 3. Toggle Favorite
+  // 3. Toggle Favorite & Watch Later
   const handleToggleFavorite = async () => {
     if (!details) return;
     const nowFav = await desktopAPI.toggleFavorite({
@@ -112,12 +131,74 @@ export const WatchScreen: React.FC<WatchScreenProps> = ({
     setIsFavorite(nowFav);
   };
 
-  // 4. Save Resume Position periodically (Throttled to at most once per 5 seconds to prevent Main Thread SQLite disk lock)
+  const handleWatchLaterClick = () => {
+    if (!details) return;
+    if (!isSignedIn) {
+      onOpenSignIn?.();
+      return;
+    }
+    onToggleWatchLater?.({
+      id: details.id,
+      title: details.title,
+      channel: details.channel,
+      channelId: details.channelId,
+      thumbnail: details.thumbnails?.[0]?.url || `https://i.ytimg.com/vi/${details.id}/hqdefault.jpg`,
+      durationSec: details.durationSec,
+    });
+  };
+
+  // 4. Save Resume Position periodically (5s local SQLite, 25s Google Watch History sync)
   const lastSavedResumeMs = useRef<number>(0);
+  const lastSyncedGoogleMs = useRef<number>(-1);
+  const latestProgressRef = useRef<{ posMs: number; durMs: number; signedIn: boolean }>({
+    posMs: 0,
+    durMs: 0,
+    signedIn: false,
+  });
+
+  useEffect(() => {
+    latestProgressRef.current.signedIn = isSignedIn;
+  }, [isSignedIn]);
+
+  useEffect(() => {
+    lastSavedResumeMs.current = 0;
+    lastSyncedGoogleMs.current = -1;
+    latestProgressRef.current = { posMs: 0, durMs: 0, signedIn: isSignedIn };
+
+    return () => {
+      const snap = latestProgressRef.current;
+      if (
+        snap.signedIn &&
+        snap.durMs > 0 &&
+        snap.posMs >= 3000 &&
+        Math.abs(snap.posMs - lastSyncedGoogleMs.current) >= 2000
+      ) {
+        desktopAPI
+          .syncWatchProgress(videoId, snap.posMs / 1000, snap.durMs / 1000)
+          .catch(() => {});
+      }
+    };
+  }, [videoId]);
+
   const handleTimeUpdate = (posMs: number, durMs: number) => {
+    latestProgressRef.current = { posMs, durMs, signedIn: isSignedIn };
+
     if (Math.abs(posMs - lastSavedResumeMs.current) >= 5000) {
       lastSavedResumeMs.current = posMs;
       desktopAPI.saveResume(videoId, posMs, durMs);
+    }
+
+    if (
+      isSignedIn &&
+      durMs > 0 &&
+      posMs >= 3000 &&
+      (lastSyncedGoogleMs.current < 0 ||
+        Math.abs(posMs - lastSyncedGoogleMs.current) >= 25000)
+    ) {
+      lastSyncedGoogleMs.current = posMs;
+      desktopAPI
+        .syncWatchProgress(videoId, posMs / 1000, durMs / 1000)
+        .catch(() => {});
     }
   };
 
@@ -199,6 +280,31 @@ export const WatchScreen: React.FC<WatchScreenProps> = ({
 
               {/* Action Buttons */}
               <div className="flex items-center space-x-2">
+                {/* Watch Later Button */}
+                <button
+                  type="button"
+                  onClick={handleWatchLaterClick}
+                  className={`flex items-center space-x-1.5 px-3.5 py-2 rounded-[8px] text-xs font-semibold border transition-colors duration-150 ${
+                    isSignedIn && isWatchLater
+                      ? 'bg-emerald-600 text-white border-emerald-500'
+                      : 'bg-yt-card hover:bg-yt-hover text-yt-text border-white/[0.07]'
+                  }`}
+                  title={
+                    isSignedIn
+                      ? isWatchLater
+                        ? 'Xóa khỏi Xem sau trên tài khoản Google'
+                        : 'Thêm vào Xem sau trên tài khoản Google'
+                      : 'Đăng nhập Google để lưu vào Xem sau'
+                  }
+                >
+                  {isSignedIn && isWatchLater ? (
+                    <Check className="w-4 h-4" />
+                  ) : (
+                    <Clock className="w-4 h-4" />
+                  )}
+                  <span>{isSignedIn && isWatchLater ? 'Đã thêm Xem sau' : 'Xem sau'}</span>
+                </button>
+
                 {/* Favorite Button */}
                 <button
                   type="button"

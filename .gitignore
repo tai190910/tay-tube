@@ -26,6 +26,11 @@ release/
 # Environment & secrets
 .env
 .env.*
+!.env.example
+
+# Reference repositories
+meetube-3.5.8/
+YTXTube-2.2.0/
 
 # Logs, caches & OS files
 *.log

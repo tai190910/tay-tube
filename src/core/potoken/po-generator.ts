@@ -13,7 +13,7 @@ export interface PoTokenResult {
   mintedAt: number;
 }
 
-const GOOGLE_API_KEY = 'AIzaSyDyT5W0Jh49F30Pqqtyfdf7pDLFKLJoAnw';
+const GOOGLE_API_KEY = process.env.TAYTUBE_GOOGLE_API_KEY || '';
 const REQUEST_KEY = 'O43z0dpjhgX20SCx4KAo';
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.3';

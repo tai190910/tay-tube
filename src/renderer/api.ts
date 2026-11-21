@@ -6,7 +6,11 @@ import {
   DeviceAuthStartResult,
   FavoriteItemUI,
   HistoryItemUI,
+  MusicAudioStreamResult,
+  MusicShelf,
+  MusicTrackItem,
   ResumeItemUI,
+  ShortsFeedResult,
   TayTubeVideoDetails,
   VideoItemUI,
 } from './types.js';
@@ -70,6 +74,34 @@ export const desktopAPI = {
 
   getVideoComments: (videoId: string): Promise<CommentsResult> =>
     invoke<CommentsResult>('get_video_comments', { videoId }),
+
+  // YouTube Shorts APIs
+  getShortsFeed: (continuation?: string | null): Promise<ShortsFeedResult> =>
+    invoke<ShortsFeedResult>('get_shorts_feed', { continuation: continuation || null }),
+
+  rateVideo: (videoId: string, like: boolean): Promise<boolean> =>
+    invoke<boolean>('rate_video', { videoId, like }),
+
+  // YouTube Music APIs (WEB_REMIX + audio-only proxy stream)
+  getMusicHome: (): Promise<MusicShelf[]> => invoke<MusicShelf[]>('get_music_home'),
+
+  searchMusic: (query: string, filter?: 'songs' | 'videos' | 'all'): Promise<MusicTrackItem[]> =>
+    invoke<MusicTrackItem[]>('search_music', { query, filter: filter || 'songs' }),
+
+  getMusicRadio: (videoId: string, playlistId?: string | null): Promise<MusicTrackItem[]> =>
+    invoke<MusicTrackItem[]>('get_music_radio', {
+      videoId,
+      playlistId: playlistId || null,
+    }),
+
+  getMusicAudioStream: (
+    videoId: string,
+    playlistId?: string | null
+  ): Promise<MusicAudioStreamResult> =>
+    invoke<MusicAudioStreamResult>('get_music_audio_stream', {
+      videoId,
+      playlistId: playlistId || null,
+    }),
 
   // SQLite Database APIs (rusqlite bundled in Tauri backend)
   getHistory: (limit = 100): Promise<HistoryItemUI[]> =>

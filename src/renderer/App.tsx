@@ -3,18 +3,24 @@ import { Header } from './components/Header.js';
 import { Sidebar, NavTab } from './components/Sidebar.js';
 import { VideoGrid } from './components/VideoGrid.js';
 import { WatchScreen } from './components/WatchScreen.js';
+import { ShortsScreen } from './components/ShortsScreen.js';
+import { MusicScreen, RepeatMode } from './components/MusicScreen.js';
+import { MusicMiniPlayer } from './components/MusicMiniPlayer.js';
 import { GoogleSignInModal } from './components/GoogleSignInModal.js';
 import { desktopAPI } from './api.js';
 import {
   AuthAccountProfile,
   FavoriteItemUI,
   HistoryItemUI,
+  MusicTrackItem,
   ResumeItemUI,
   VideoItemUI,
 } from './types.js';
 
 export type ActiveView =
   | 'home'
+  | 'shorts'
+  | 'music'
   | 'subscriptions'
   | 'history'
   | 'watch_later'
@@ -41,6 +47,7 @@ export const App: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [searchResults, setSearchResults] = useState<VideoItemUI[]>([]);
   const [isSearching, setIsSearching] = useState<boolean>(false);
+  const [musicSearchExternal, setMusicSearchExternal] = useState<string>('');
   const searchSeqRef = useRef<number>(0);
 
   // Feed States
@@ -56,7 +63,22 @@ export const App: React.FC = () => {
   const [favoritesSet, setFavoritesSet] = useState<Set<string>>(new Set());
   const [watchLaterSet, setWatchLaterSet] = useState<Set<string>>(new Set());
 
-  // Synchronous cleanup callback registered by active AvSyncPlayer (destroys Shaka/HLS & stops <video> immediately)
+  // Persistent YouTube Music Audio Player States
+  const [musicTrack, setMusicTrack] = useState<MusicTrackItem | null>(null);
+  const [musicQueue, setMusicQueue] = useState<MusicTrackItem[]>([]);
+  const [musicPlaying, setMusicPlaying] = useState<boolean>(false);
+  const [musicLoading, setMusicLoading] = useState<boolean>(false);
+  const [musicCurrentTime, setMusicCurrentTime] = useState<number>(0);
+  const [musicDuration, setMusicDuration] = useState<number>(0);
+  const [musicVolume, setMusicVolume] = useState<number>(0.9);
+  const [musicMuted, setMusicMuted] = useState<boolean>(false);
+  const [musicShuffle, setMusicShuffle] = useState<boolean>(false);
+  const [musicRepeat, setMusicRepeat] = useState<RepeatMode>('off');
+
+  const musicAudioRef = useRef<HTMLAudioElement | null>(null);
+  const musicLoadSeqRef = useRef<number>(0);
+
+  // Synchronous cleanup callback registered by active AvSyncPlayer or ShortsScreen
   const playerCleanupRef = useRef<(() => void) | null>(null);
   const registerPlayerCleanup = useCallback((cleanupFn: () => void) => {
     playerCleanupRef.current = cleanupFn;
@@ -70,6 +92,14 @@ export const App: React.FC = () => {
         // Ignore teardown errors
       }
       playerCleanupRef.current = null;
+    }
+  }, []);
+
+  const pauseMusicPlayer = useCallback(() => {
+    const audio = musicAudioRef.current;
+    if (audio && !audio.paused) {
+      audio.pause();
+      setMusicPlaying(false);
     }
   }, []);
 
@@ -196,11 +226,166 @@ export const App: React.FC = () => {
       });
   }, [loadHomeVideos, loadWatchLater, refreshResumes]);
 
-  // 2. Unified Navigation Controller (Sidebar & Logo clicks)
+  // 2. Music Playback Controller (Persistent audio-only proxy stream)
+  const playMusicTrack = useCallback(
+    async (track: MusicTrackItem, queueList?: MusicTrackItem[]) => {
+      // Stop any running video player so audio never clashes
+      stopActivePlayer();
+
+      const seq = ++musicLoadSeqRef.current;
+      setMusicTrack(track);
+      setMusicCurrentTime(0);
+      setMusicDuration(track.durationSec || 0);
+      setMusicLoading(true);
+      if (queueList && queueList.length > 0) {
+        setMusicQueue(queueList);
+      } else {
+        setMusicQueue((prev) => (prev.some((t) => t.id === track.id) ? prev : [track, ...prev]));
+      }
+
+      const audio = musicAudioRef.current;
+      if (audio) {
+        audio.pause();
+        audio.removeAttribute('src');
+        audio.load();
+      }
+
+      try {
+        const res = await desktopAPI.getMusicAudioStream(track.id, track.playlistId);
+        if (musicLoadSeqRef.current !== seq) return;
+
+        const enrichedTrack: MusicTrackItem = {
+          ...track,
+          title: track.title || res.title,
+          artist: track.artist || res.artist,
+          durationSec: res.durationSec || track.durationSec,
+          thumbnail: track.thumbnail || res.thumbnail,
+        };
+        setMusicTrack(enrichedTrack);
+        setMusicDuration(res.durationSec || track.durationSec || 0);
+
+        if (res.radioTracks && res.radioTracks.length > 0) {
+          setMusicQueue((prev) => {
+            if (prev.length > 1) return prev;
+            const seen = new Set<string>([enrichedTrack.id]);
+            const merged = [enrichedTrack];
+            for (const r of res.radioTracks) {
+              if (!seen.has(r.id)) {
+                seen.add(r.id);
+                merged.push(r);
+              }
+            }
+            return merged;
+          });
+        }
+
+        if (musicAudioRef.current) {
+          musicAudioRef.current.src = res.proxyAudioUrl;
+          musicAudioRef.current.volume = musicMuted ? 0 : musicVolume;
+          musicAudioRef.current.load();
+          await musicAudioRef.current.play();
+          if (musicLoadSeqRef.current === seq) {
+            setMusicPlaying(true);
+          }
+        }
+      } catch {
+        if (musicLoadSeqRef.current === seq) {
+          setMusicPlaying(false);
+        }
+      } finally {
+        if (musicLoadSeqRef.current === seq) {
+          setMusicLoading(false);
+        }
+      }
+    },
+    [stopActivePlayer, musicMuted, musicVolume]
+  );
+
+  const handleMusicTogglePlay = useCallback(() => {
+    const audio = musicAudioRef.current;
+    if (!audio || !musicTrack) return;
+    if (audio.paused) {
+      audio.play().then(() => setMusicPlaying(true)).catch(() => {});
+    } else {
+      audio.pause();
+      setMusicPlaying(false);
+    }
+  }, [musicTrack]);
+
+  const handleMusicNext = useCallback(() => {
+    if (!musicTrack || musicQueue.length === 0) return;
+    if (musicRepeat === 'one') {
+      if (musicAudioRef.current) {
+        musicAudioRef.current.currentTime = 0;
+        musicAudioRef.current.play().then(() => setMusicPlaying(true)).catch(() => {});
+      }
+      return;
+    }
+
+    if (musicShuffle && musicQueue.length > 1) {
+      const candidates = musicQueue.filter((t) => t.id !== musicTrack.id);
+      const picked = candidates[Math.floor(Math.random() * candidates.length)];
+      if (picked) playMusicTrack(picked, musicQueue);
+      return;
+    }
+
+    const idx = musicQueue.findIndex((t) => t.id === musicTrack.id);
+    if (idx >= 0 && idx + 1 < musicQueue.length) {
+      playMusicTrack(musicQueue[idx + 1], musicQueue);
+    } else if (musicRepeat === 'all' && musicQueue.length > 0) {
+      playMusicTrack(musicQueue[0], musicQueue);
+    } else {
+      setMusicPlaying(false);
+    }
+  }, [musicTrack, musicQueue, musicRepeat, musicShuffle, playMusicTrack]);
+
+  const handleMusicPrev = useCallback(() => {
+    const audio = musicAudioRef.current;
+    if (audio && audio.currentTime > 3) {
+      audio.currentTime = 0;
+      return;
+    }
+    if (!musicTrack || musicQueue.length === 0) return;
+    const idx = musicQueue.findIndex((t) => t.id === musicTrack.id);
+    if (idx > 0) {
+      playMusicTrack(musicQueue[idx - 1], musicQueue);
+    } else if (musicRepeat === 'all' && musicQueue.length > 0) {
+      playMusicTrack(musicQueue[musicQueue.length - 1], musicQueue);
+    }
+  }, [musicTrack, musicQueue, musicRepeat, playMusicTrack]);
+
+  const handleMusicSeek = useCallback((sec: number) => {
+    const audio = musicAudioRef.current;
+    if (!audio) return;
+    audio.currentTime = sec;
+    setMusicCurrentTime(sec);
+  }, []);
+
+  const handleMusicClose = useCallback(() => {
+    musicLoadSeqRef.current += 1;
+    const audio = musicAudioRef.current;
+    if (audio) {
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
+    }
+    setMusicPlaying(false);
+    setMusicLoading(false);
+    setMusicTrack(null);
+    setMusicCurrentTime(0);
+    setMusicDuration(0);
+  }, []);
+
+  // 3. Unified Navigation Controller (Sidebar & Logo clicks)
   const navigateTo = useCallback(
     (targetView: NavTab) => {
-      // Step 1: Synchronously destroy any active video player so nothing keeps running in background
+      // Step 1: Synchronously destroy any active video/shorts player
       stopActivePlayer();
+
+      // Pause background Music audio if user opens Shorts (music continues on browse/watch-later/etc.)
+      if (targetView === 'shorts') {
+        pauseMusicPlayer();
+      }
 
       // Step 2: Invalidate any in-flight search request and clear all search state
       searchSeqRef.current += 1;
@@ -241,6 +426,7 @@ export const App: React.FC = () => {
     },
     [
       stopActivePlayer,
+      pauseMusicPlayer,
       refreshResumes,
       homeVideos.length,
       loadHomeVideos,
@@ -259,7 +445,7 @@ export const App: React.FC = () => {
     [navigateTo]
   );
 
-  // 3. Auth Callbacks
+  // 4. Auth Callbacks
   const handleSignedIn = useCallback(
     (account: AuthAccountProfile) => {
       setAuthAccount(account);
@@ -299,11 +485,11 @@ export const App: React.FC = () => {
     }
   }, [activeView, loadHistory, loadHomeVideos]);
 
-  // 4. Select Video to Watch
+  // 5. Select Video to Watch
   const handleSelectVideo = useCallback(
     (videoId: string) => {
-      // Tear down previous player before switching videos
       stopActivePlayer();
+      pauseMusicPlayer();
 
       const resume = resumes[videoId];
       const startSec =
@@ -312,10 +498,10 @@ export const App: React.FC = () => {
       setSelectedVideo(videoId);
       setActiveView('watch');
     },
-    [stopActivePlayer, resumes]
+    [stopActivePlayer, pauseMusicPlayer, resumes]
   );
 
-  // 5. Search Handler (Supports search queries or direct YouTube URL pasting)
+  // 6. Search Handler (Routes Music searches in Music Mode, else Video search / URL paste)
   const handleSearch = useCallback(
     async (query: string) => {
       const trimmed = query.trim();
@@ -331,7 +517,11 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Stop any running video player immediately
+      if (activeView === 'music') {
+        setMusicSearchExternal(trimmed);
+        return;
+      }
+
       stopActivePlayer();
 
       const seq = ++searchSeqRef.current;
@@ -344,7 +534,6 @@ export const App: React.FC = () => {
 
       try {
         const results = await desktopAPI.searchVideos(trimmed);
-        // Ignore stale results if the user already navigated to another tab
         if (searchSeqRef.current !== seq) return;
         setSearchResults(results || []);
       } catch {
@@ -356,10 +545,10 @@ export const App: React.FC = () => {
         }
       }
     },
-    [handleSelectVideo, stopActivePlayer]
+    [activeView, handleSelectVideo, stopActivePlayer]
   );
 
-  // 6. Toggle Favorite from Card
+  // 7. Toggle Favorite from Card
   const handleToggleFavorite = async (item: VideoItemUI) => {
     const isFavNow = await desktopAPI.toggleFavorite({
       id: item.id,
@@ -381,7 +570,7 @@ export const App: React.FC = () => {
     }
   };
 
-  // 7. Toggle Watch Later (Google WL Playlist)
+  // 8. Toggle Watch Later (Google WL Playlist)
   const handleToggleWatchLater = useCallback(
     async (item: VideoItemUI) => {
       if (!authAccount) {
@@ -409,7 +598,6 @@ export const App: React.FC = () => {
           await desktopAPI.addToWatchLater(item.id);
         }
       } catch (err: any) {
-        // Revert optimistic update on failure
         setWatchLaterSet((prev) => {
           const next = new Set(prev);
           if (wasIn) next.add(item.id);
@@ -423,7 +611,7 @@ export const App: React.FC = () => {
     [authAccount, watchLaterSet, activeView, loadWatchLater]
   );
 
-  // 8. History Management
+  // 9. History Management
   const handleClearHistory = async () => {
     await desktopAPI.clearHistory();
     setHistoryVideos([]);
@@ -469,8 +657,26 @@ export const App: React.FC = () => {
         onSignOut={handleSignOut}
       />
 
+      {/* Hidden Persistent Audio Element for YouTube Music Mode */}
+      <audio
+        ref={musicAudioRef}
+        onTimeUpdate={() => {
+          if (musicAudioRef.current) {
+            setMusicCurrentTime(musicAudioRef.current.currentTime || 0);
+          }
+        }}
+        onDurationChange={() => {
+          const d = musicAudioRef.current?.duration;
+          if (d && isFinite(d) && d > 0) setMusicDuration(d);
+        }}
+        onPlay={() => setMusicPlaying(true)}
+        onPause={() => setMusicPlaying(false)}
+        onEnded={handleMusicNext}
+        className="hidden"
+      />
+
       {/* Main Body */}
-      <div className="flex flex-1 h-[calc(100vh-3.5rem)] overflow-hidden">
+      <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Sidebar: always accessible (compact rail in watch mode so user can switch tabs anytime) */}
         <Sidebar
           activeView={activeView}
@@ -501,6 +707,46 @@ export const App: React.FC = () => {
                 }
               }}
               onSelectRelated={handleSelectVideo}
+            />
+          ) : activeView === 'shorts' ? (
+            <ShortsScreen
+              isSignedIn={Boolean(authAccount)}
+              favoritesSet={favoritesSet}
+              watchLaterSet={watchLaterSet}
+              onToggleFavorite={handleToggleFavorite}
+              onToggleWatchLater={handleToggleWatchLater}
+              onOpenSignIn={() => setShowSignInModal(true)}
+              onOpenInWatch={handleSelectVideo}
+              onRegisterCleanup={registerPlayerCleanup}
+            />
+          ) : activeView === 'music' ? (
+            <MusicScreen
+              currentTrack={musicTrack}
+              isPlaying={musicPlaying}
+              isLoadingTrack={musicLoading}
+              currentTime={musicCurrentTime}
+              duration={musicDuration}
+              shuffle={musicShuffle}
+              repeatMode={musicRepeat}
+              queue={musicQueue}
+              favoritesSet={favoritesSet}
+              watchLaterSet={watchLaterSet}
+              externalQuery={musicSearchExternal}
+              onConsumeExternalQuery={() => setMusicSearchExternal('')}
+              onPlayTrack={playMusicTrack}
+              onAddToQueue={(t) =>
+                setMusicQueue((prev) => (prev.some((x) => x.id === t.id) ? prev : [...prev, t]))
+              }
+              onTogglePlay={handleMusicTogglePlay}
+              onNext={handleMusicNext}
+              onPrev={handleMusicPrev}
+              onSeek={handleMusicSeek}
+              onToggleShuffle={() => setMusicShuffle((s) => !s)}
+              onCycleRepeat={() =>
+                setMusicRepeat((r) => (r === 'off' ? 'all' : r === 'all' ? 'one' : 'off'))
+              }
+              onToggleFavorite={handleToggleFavorite}
+              onToggleWatchLater={handleToggleWatchLater}
             />
           ) : activeView === 'search' ? (
             <VideoGrid
@@ -586,7 +832,8 @@ export const App: React.FC = () => {
               }
               emptySubtitle={
                 authAccount
-                  ? feedError || 'Nhấn biểu tượng đồng hồ trên thẻ video hoặc nút Xem sau khi phát để lưu.'
+                  ? feedError ||
+                    'Nhấn biểu tượng đồng hồ trên thẻ video hoặc nút Xem sau khi phát để lưu.'
                   : 'Đăng nhập tài khoản Google để truy cập và thêm/xóa video khỏi danh sách Xem sau.'
               }
               emptyAction={
@@ -635,6 +882,46 @@ export const App: React.FC = () => {
           )}
         </main>
       </div>
+
+      {/* Persistent Docked Bottom Mini-Player for YouTube Music Mode */}
+      {musicTrack && (
+        <MusicMiniPlayer
+          track={musicTrack}
+          isPlaying={musicPlaying}
+          isLoading={musicLoading}
+          currentTime={musicCurrentTime}
+          duration={musicDuration}
+          volume={musicMuted ? 0 : musicVolume}
+          isMuted={musicMuted}
+          shuffle={musicShuffle}
+          repeatMode={musicRepeat}
+          onOpenMusic={() => navigateTo('music')}
+          onTogglePlay={handleMusicTogglePlay}
+          onNext={handleMusicNext}
+          onPrev={handleMusicPrev}
+          onSeek={handleMusicSeek}
+          onVolumeChange={(v) => {
+            setMusicVolume(v);
+            setMusicMuted(v === 0);
+            if (musicAudioRef.current) {
+              musicAudioRef.current.volume = v;
+              musicAudioRef.current.muted = v === 0;
+            }
+          }}
+          onToggleMute={() => {
+            const next = !musicMuted;
+            setMusicMuted(next);
+            if (musicAudioRef.current) {
+              musicAudioRef.current.muted = next;
+            }
+          }}
+          onToggleShuffle={() => setMusicShuffle((s) => !s)}
+          onCycleRepeat={() =>
+            setMusicRepeat((r) => (r === 'off' ? 'all' : r === 'all' ? 'one' : 'off'))
+          }
+          onClose={handleMusicClose}
+        />
+      )}
 
       {/* Google Device OAuth2 Sign-In Modal */}
       <GoogleSignInModal

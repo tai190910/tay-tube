@@ -1,7 +1,24 @@
 import React from 'react';
-import { Home, Users, History, Clock, Heart, ChevronLeft, ChevronRight } from 'lucide-react';
+import {
+  Home,
+  Zap,
+  Music,
+  Users,
+  History,
+  Clock,
+  Heart,
+  ChevronLeft,
+  ChevronRight,
+} from 'lucide-react';
 
-export type NavTab = 'home' | 'subscriptions' | 'history' | 'watch_later' | 'favorites';
+export type NavTab =
+  | 'home'
+  | 'shorts'
+  | 'music'
+  | 'subscriptions'
+  | 'history'
+  | 'watch_later'
+  | 'favorites';
 
 interface SidebarProps {
   activeView: string;
@@ -18,6 +35,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
 }) => {
   const navItems: Array<{ id: NavTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
     { id: 'home', label: 'Trang chủ', icon: Home },
+    { id: 'shorts', label: 'Shorts', icon: Zap },
+    { id: 'music', label: 'YouTube Music', icon: Music },
     { id: 'subscriptions', label: 'Kênh đăng ký', icon: Users },
     { id: 'history', label: 'Lịch sử xem', icon: History },
     { id: 'watch_later', label: 'Xem sau', icon: Clock },

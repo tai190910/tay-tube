@@ -139,6 +139,54 @@ export interface DeviceAuthPollResult {
   error?: string | null;
 }
 
+export interface ShortVideoItem {
+  id: string;
+  title: string;
+  channel: string;
+  channelId?: string;
+  channelAvatar?: string;
+  thumbnail: string;
+  likeCountText?: string;
+  commentCountText?: string;
+  viewCountText?: string;
+  publishedText?: string;
+  params?: string;
+}
+
+export interface ShortsFeedResult {
+  items: ShortVideoItem[];
+  continuationToken?: string;
+}
+
+export interface MusicTrackItem {
+  id: string;
+  title: string;
+  artist: string;
+  album?: string;
+  durationText: string;
+  durationSec: number;
+  thumbnail: string;
+  playlistId?: string;
+  explicit: boolean;
+}
+
+export interface MusicShelf {
+  title: string;
+  items: MusicTrackItem[];
+}
+
+export interface MusicAudioStreamResult {
+  videoId: string;
+  title: string;
+  artist: string;
+  durationSec: number;
+  thumbnail: string;
+  proxyAudioUrl: string;
+  mimeType: string;
+  bitrate: number;
+  radioTracks: MusicTrackItem[];
+}
+
 export interface HistoryItemUI {
   id: string;
   title: string;

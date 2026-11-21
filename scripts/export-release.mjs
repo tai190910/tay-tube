@@ -25,15 +25,33 @@ function formatMb(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-function findNsisInstaller(dir) {
+function findNsisInstaller(dir, version) {
   if (!fs.existsSync(dir)) {
     return null;
   }
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
-  const match = entries.find(
-    (entry) => entry.isFile() && /-setup\.exe$/i.test(entry.name)
-  );
-  return match ? path.join(dir, match.name) : null;
+  const installers = fs
+    .readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && /-setup\.exe$/i.test(entry.name))
+    .map((entry) => {
+      const fullPath = path.join(dir, entry.name);
+      return {
+        name: entry.name,
+        fullPath,
+        mtimeMs: fs.statSync(fullPath).mtimeMs,
+      };
+    });
+
+  if (installers.length === 0) {
+    return null;
+  }
+
+  const versionMatch = installers.find((item) => item.name.includes(version));
+  if (versionMatch) {
+    return versionMatch.fullPath;
+  }
+
+  installers.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return installers[0].fullPath;
 }
 
 fs.mkdirSync(releaseDir, { recursive: true });
@@ -48,7 +66,7 @@ if (!fs.existsSync(portableSrc)) {
   process.exit(1);
 }
 
-const setupSrc = findNsisInstaller(nsisBundleDir);
+const setupSrc = findNsisInstaller(nsisBundleDir, version);
 if (!setupSrc || !fs.existsSync(setupSrc)) {
   console.error(`[export-release] Missing NSIS installer in: ${nsisBundleDir}`);
   process.exit(1);

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
-use crate::youtube::{resolve_client_user_agent, YouTubeService, CLIENT_IOS, CLIENT_WEB};
+use crate::youtube::{resolve_client_user_agent, YouTubeService, CLIENT_VISIONOS, CLIENT_WEB};
 
 pub const PROXY_HOST: &str = "127.0.0.1";
 pub const PROXY_PORT: u16 = 8989;
@@ -27,6 +27,7 @@ pub struct ProxyState {
 pub struct HlsManifestQuery {
     pub url: Option<String>,
     pub id: Option<String>,
+    pub client: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -118,20 +119,27 @@ async fn handle_hls_manifest(
 ) -> Response {
     let video_id = q.id.unwrap_or_default();
     let mut target_hls_url = q.url.filter(|s| !s.is_empty());
+    let mut hls_client_hint: Option<&str> = None;
 
     if target_hls_url.is_none() && !video_id.is_empty() {
         let ios = state.yt.fetch_ios_streaming_data(&video_id).await;
         target_hls_url = ios.hls_manifest_url;
+        hls_client_hint = ios.client_name;
     }
 
     let Some(hls_url) = target_hls_url else {
         return text_error(StatusCode::NOT_FOUND, "HLS Manifest URL not found for video".to_string());
     };
 
+    let (hls_client_name, hls_ua) = resolve_client_user_agent(
+        q.client.as_deref().or(hls_client_hint),
+        Some(CLIENT_VISIONOS.name),
+    );
+
     let upstream = match state
         .http
         .get(&hls_url)
-        .header(header::USER_AGENT, CLIENT_IOS.user_agent)
+        .header(header::USER_AGENT, hls_ua)
         .header(header::ACCEPT, "*/*")
         .header(header::ACCEPT_ENCODING, "identity")
         .send()
@@ -149,8 +157,9 @@ async fn handle_hls_manifest(
     let status = upstream.status();
     if status.as_u16() >= 400 {
         eprintln!(
-            "[Proxy HLS Manifest Error] HTTP {} from googlevideo.com | headers={:?}",
+            "[Proxy HLS Manifest Error] HTTP {} from googlevideo.com | client={} | headers={:?}",
             status.as_u16(),
+            hls_client_name,
             upstream.headers()
         );
         return text_error(
@@ -170,7 +179,7 @@ async fn handle_hls_manifest(
         }
     };
 
-    let rewritten = rewrite_m3u8(&raw_m3u8, &final_url, &video_id);
+    let rewritten = rewrite_m3u8(&raw_m3u8, &final_url, &video_id, hls_client_name);
     let mut res = Response::new(Body::from(rewritten));
     *res.status_mut() = StatusCode::OK;
     apply_cors_headers(res.headers_mut());
@@ -237,38 +246,43 @@ async fn handle_subtitle(
     res
 }
 
+fn strip_range_query_params(mut parsed: Url) -> Url {
+    let filtered_pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter(|(k, _)| k != "range" && k != "rn")
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    if filtered_pairs.is_empty() {
+        parsed.set_query(None);
+    } else {
+        parsed.query_pairs_mut().clear().extend_pairs(filtered_pairs);
+    }
+    parsed
+}
+
 async fn handle_stream(
     method: Method,
     State(state): State<ProxyState>,
     headers: HeaderMap,
     Query(q): Query<StreamQuery>,
 ) -> Response {
-    let Ok(mut clean_url) = Url::parse(&q.url) else {
+    let Ok(parsed_url) = Url::parse(&q.url) else {
         return text_error(StatusCode::BAD_REQUEST, "Invalid url parameter".to_string());
     };
 
     // Extract signed `c=` client param before cleaning query parameters
-    let url_client: Option<String> = clean_url
+    let url_client: Option<String> = parsed_url
         .query_pairs()
         .find(|(k, _)| k == "c")
         .map(|(_, v)| v.into_owned());
 
-    let url_itag: Option<i64> = clean_url
+    let url_itag: Option<i64> = parsed_url
         .query_pairs()
         .find(|(k, _)| k == "itag")
         .and_then(|(_, v)| v.parse::<i64>().ok());
 
     // Strip conflicting range and rn params so HTTP Range headers work cleanly
-    let filtered_pairs: Vec<(String, String)> = clean_url
-        .query_pairs()
-        .filter(|(k, _)| k != "range" && k != "rn")
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
-        .collect();
-    if filtered_pairs.is_empty() {
-        clean_url.set_query(None);
-    } else {
-        clean_url.query_pairs_mut().clear().extend_pairs(filtered_pairs);
-    }
+    let clean_url = strip_range_query_params(parsed_url);
 
     let itag = q.itag.or(url_itag);
     let (client_name, user_agent) =
@@ -316,6 +330,7 @@ async fn handle_stream(
         }
     };
 
+    let initial_clean_str = clean_url.to_string();
     let mut active_target_url = clean_url;
     let mut raw_status = upstream_res.status().as_u16();
 
@@ -330,43 +345,68 @@ async fn handle_stream(
             upstream_res.headers()
         );
 
-        // Automatic fallback to alternative InnerTube client if googlevideo returns 403 Forbidden
+        // Automatic multi-client fresh-URL fallback if googlevideo returns 403 Forbidden
         if raw_status == 403 {
             if let Some(ref vid) = q.id {
-                if let Some((alt_url, alt_client, alt_ua)) = state
-                    .yt
-                    .resolve_fallback_stream_url(vid, itag, Some(client_name))
-                    .await
-                {
-                    if let Ok(mut alt_parsed) = Url::parse(&alt_url) {
-                        let pairs: Vec<(String, String)> = alt_parsed
+                let is_audio_stream =
+                    matches!(itag, Some(139 | 140 | 141 | 249 | 250 | 251 | 599 | 600))
+                        || active_target_url
                             .query_pairs()
-                            .filter(|(k, _)| k != "range" && k != "rn")
-                            .map(|(k, v)| (k.into_owned(), v.into_owned()))
-                            .collect();
-                        alt_parsed.query_pairs_mut().clear().extend_pairs(pairs);
-                        let alt_range =
-                            build_chunked_range_header(raw_client_range.as_deref(), &alt_parsed);
-                        if let Ok(retried) = send_upstream(
-                            alt_parsed.as_str(),
-                            alt_ua,
-                            alt_range.as_deref(),
-                            req_method.clone(),
-                        )
-                        .await
-                        {
-                            raw_status = retried.status().as_u16();
-                            if raw_status >= 400 {
-                                eprintln!(
-                                    "[Proxy Fallback Error] HTTP {} | fallback_client={} | headers={:?}",
-                                    raw_status,
-                                    alt_client,
-                                    retried.headers()
-                                );
-                            }
-                            active_target_url = alt_parsed;
-                            upstream_res = retried;
+                            .find(|(k, _)| k == "mime")
+                            .map(|(_, v)| v.to_lowercase().starts_with("audio/"))
+                            .unwrap_or(false);
+
+                let candidates = state
+                    .yt
+                    .resolve_fallback_stream_candidates(
+                        vid,
+                        itag,
+                        Some(client_name),
+                        is_audio_stream,
+                    )
+                    .await;
+
+                for (alt_url, alt_client, alt_ua) in candidates {
+                    if alt_url == q.url {
+                        continue;
+                    }
+                    let Ok(alt_parsed_raw) = Url::parse(&alt_url) else {
+                        continue;
+                    };
+                    let alt_parsed = strip_range_query_params(alt_parsed_raw);
+                    if alt_parsed.as_str() == initial_clean_str {
+                        continue;
+                    }
+                    let alt_range =
+                        build_chunked_range_header(raw_client_range.as_deref(), &alt_parsed);
+                    if let Ok(retried) = send_upstream(
+                        alt_parsed.as_str(),
+                        alt_ua,
+                        alt_range.as_deref(),
+                        req_method.clone(),
+                    )
+                    .await
+                    {
+                        raw_status = retried.status().as_u16();
+                        active_target_url = alt_parsed;
+                        upstream_res = retried;
+                        if (200..300).contains(&raw_status) {
+                            eprintln!(
+                                "[Proxy Fallback OK] HTTP {} | from={} -> fallback_client={} | itag={:?}",
+                                raw_status,
+                                client_name,
+                                alt_client,
+                                itag
+                            );
+                            break;
                         }
+                        eprintln!(
+                            "[Proxy Fallback Error] HTTP {} | fallback_client={} | UA=\"{}\" | headers={:?}",
+                            raw_status,
+                            alt_client,
+                            alt_ua,
+                            upstream_res.headers()
+                        );
                     }
                 }
             }
@@ -478,13 +518,19 @@ pub fn is_hls_playlist_url(abs_url: &str) -> bool {
 }
 
 /// Rewrites every nested playlist URL to `/hls-manifest` and every media segment URL to `/stream`.
-pub fn rewrite_m3u8(raw_m3u8: &str, base_url: &str, video_id: &str) -> String {
+pub fn rewrite_m3u8(
+    raw_m3u8: &str,
+    base_url: &str,
+    video_id: &str,
+    client_name: &str,
+) -> String {
     let proxy_base = format!("http://{PROXY_HOST}:{PROXY_PORT}");
     let id_suffix = if video_id.is_empty() {
         String::new()
     } else {
         format!("&id={}", urlencoding::encode(video_id))
     };
+    let encoded_client = urlencoding::encode(client_name);
 
     let base_parsed = Url::parse(base_url).ok();
 
@@ -499,12 +545,12 @@ pub fn rewrite_m3u8(raw_m3u8: &str, base_url: &str, video_id: &str) -> String {
 
         if is_hls_playlist_url(&resolved) {
             format!(
-                "{proxy_base}/hls-manifest?url={}{id_suffix}",
+                "{proxy_base}/hls-manifest?url={}&client={encoded_client}{id_suffix}",
                 urlencoding::encode(&resolved)
             )
         } else {
             format!(
-                "{proxy_base}/stream?url={}&client=IOS{id_suffix}",
+                "{proxy_base}/stream?url={}&client={encoded_client}{id_suffix}",
                 urlencoding::encode(&resolved)
             )
         }
@@ -576,10 +622,27 @@ mod tests {
     #[test]
     fn rewrite_m3u8_distinguishes_playlist_vs_ts_segments() {
         let master = "#EXTM3U\n#EXT-X-MEDIA:URI=\"https://manifest.googlevideo.com/api/manifest/hls_playlist/id/123/index.m3u8\",TYPE=AUDIO\nhttps://rr9.googlevideo.com/videoplayback/id/123/playlist/index.m3u8/govp/slices=0-100/gosq/0/file/seg.ts\n";
-        let out = rewrite_m3u8(master, "https://manifest.googlevideo.com/api/manifest/hls_variant/index.m3u8", "dQw4w9WgXcQ");
+        let out_ios = rewrite_m3u8(
+            master,
+            "https://manifest.googlevideo.com/api/manifest/hls_variant/index.m3u8",
+            "dQw4w9WgXcQ",
+            "IOS",
+        );
 
-        assert!(out.contains("URI=\"http://127.0.0.1:8989/hls-manifest?url="));
-        assert!(out.contains("\nhttp://127.0.0.1:8989/stream?url="));
-        assert!(out.contains("&client=IOS&id=dQw4w9WgXcQ"));
+        assert!(out_ios.contains("URI=\"http://127.0.0.1:8989/hls-manifest?url="));
+        assert!(out_ios.contains("&client=IOS&id=dQw4w9WgXcQ\""));
+        assert!(out_ios.contains("\nhttp://127.0.0.1:8989/stream?url="));
+        assert!(out_ios.contains("&client=IOS&id=dQw4w9WgXcQ"));
+
+        let out_vision = rewrite_m3u8(
+            master,
+            "https://manifest.googlevideo.com/api/manifest/hls_variant/index.m3u8",
+            "dQw4w9WgXcQ",
+            "VISIONOS",
+        );
+        assert!(out_vision.contains("URI=\"http://127.0.0.1:8989/hls-manifest?url="));
+        assert!(out_vision.contains("&client=VISIONOS&id=dQw4w9WgXcQ\""));
+        assert!(out_vision.contains("\nhttp://127.0.0.1:8989/stream?url="));
+        assert!(out_vision.contains("&client=VISIONOS&id=dQw4w9WgXcQ"));
     }
 }

@@ -11,6 +11,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use url::Url;
 
 const INNERTUBE_BASE: &str = "https://www.youtube.com/youtubei/v1/";
+const MUSIC_INNERTUBE_BASE: &str = "https://music.youtube.com/youtubei/v1/";
+const MUSIC_CLIENT_NAME: &str = "WEB_REMIX";
+const MUSIC_CLIENT_ID: &str = "67";
+const MUSIC_CLIENT_VERSION: &str = "1.20260708.01.00";
+const MUSIC_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const CACHE_TTL_PLAYER: Duration = Duration::from_secs(180);
 const CACHE_TTL_SPONSOR: Duration = Duration::from_secs(600);
 
@@ -26,45 +31,63 @@ pub struct InnerTubeClientConfig {
     pub device_model: &'static str,
     pub platform: &'static str,
     pub client_screen: &'static str,
+    pub android_sdk_version: Option<u32>,
 }
+
+pub const CLIENT_VISIONOS: InnerTubeClientConfig = InnerTubeClientConfig {
+    name: "VISIONOS",
+    id: "101",
+    version: "1.02",
+    user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
+    os_name: "visionOS",
+    os_version: "26.5.23O471",
+    device_make: "Apple",
+    device_model: "RealityDevice17,1",
+    platform: "TABLET",
+    client_screen: "WATCH",
+    android_sdk_version: None,
+};
 
 pub const CLIENT_ANDROID_VR: InnerTubeClientConfig = InnerTubeClientConfig {
     name: "ANDROID_VR",
     id: "28",
-    version: "1.60.19",
-    user_agent: "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+    version: "1.65.10",
+    user_agent: "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
     os_name: "Android",
-    os_version: "12L",
+    os_version: "12",
     device_make: "Oculus",
     device_model: "Quest 3",
     platform: "MOBILE",
     client_screen: "WATCH",
+    android_sdk_version: Some(32),
 };
 
 pub const CLIENT_ANDROID: InnerTubeClientConfig = InnerTubeClientConfig {
     name: "ANDROID",
     id: "3",
-    version: "20.10.38",
-    user_agent: "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip",
+    version: "21.26.364",
+    user_agent: "com.google.android.youtube/21.26.364 (Linux; U; Android 11) gzip",
     os_name: "Android",
-    os_version: "14",
+    os_version: "11",
     device_make: "Google",
     device_model: "Pixel 8",
     platform: "MOBILE",
     client_screen: "WATCH",
+    android_sdk_version: Some(30),
 };
 
 pub const CLIENT_IOS: InnerTubeClientConfig = InnerTubeClientConfig {
     name: "IOS",
     id: "5",
-    version: "21.10.3",
-    user_agent: "com.google.ios.youtube/21.10.3 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)",
+    version: "21.26.4",
+    user_agent: "com.google.ios.youtube/21.26.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
     os_name: "iPhone",
-    os_version: "18.1.0.22B83",
+    os_version: "18.3.2.22D82",
     device_make: "Apple",
     device_model: "iPhone16,2",
     platform: "MOBILE",
     client_screen: "WATCH",
+    android_sdk_version: None,
 };
 
 pub const CLIENT_IOS_HDR: InnerTubeClientConfig = InnerTubeClientConfig {
@@ -78,6 +101,7 @@ pub const CLIENT_IOS_HDR: InnerTubeClientConfig = InnerTubeClientConfig {
     device_model: "iPhone16,3",
     platform: "MOBILE",
     client_screen: "WATCH",
+    android_sdk_version: None,
 };
 
 pub const CLIENT_TVHTML5_SIMPLY_EMBED: InnerTubeClientConfig = InnerTubeClientConfig {
@@ -91,6 +115,7 @@ pub const CLIENT_TVHTML5_SIMPLY_EMBED: InnerTubeClientConfig = InnerTubeClientCo
     device_model: "PlayStation 4",
     platform: "TV",
     client_screen: "EMBED",
+    android_sdk_version: None,
 };
 
 pub const CLIENT_TVHTML5: InnerTubeClientConfig = InnerTubeClientConfig {
@@ -104,6 +129,7 @@ pub const CLIENT_TVHTML5: InnerTubeClientConfig = InnerTubeClientConfig {
     device_model: "SmartTV",
     platform: "TV",
     client_screen: "WATCH",
+    android_sdk_version: None,
 };
 
 pub const CLIENT_WEB_EMBED: InnerTubeClientConfig = InnerTubeClientConfig {
@@ -117,6 +143,7 @@ pub const CLIENT_WEB_EMBED: InnerTubeClientConfig = InnerTubeClientConfig {
     device_model: "",
     platform: "DESKTOP",
     client_screen: "EMBED",
+    android_sdk_version: None,
 };
 
 pub const CLIENT_WEB: InnerTubeClientConfig = InnerTubeClientConfig {
@@ -130,6 +157,7 @@ pub const CLIENT_WEB: InnerTubeClientConfig = InnerTubeClientConfig {
     device_model: "",
     platform: "DESKTOP",
     client_screen: "WATCH",
+    android_sdk_version: None,
 };
 
 /// Resolves the exact User-Agent matching the YouTube InnerTube client that signed the googlevideo.com URL.
@@ -141,10 +169,11 @@ pub fn resolve_client_user_agent(
     let raw = url_client_param
         .filter(|s| !s.is_empty())
         .or_else(|| hint_client_param.filter(|s| !s.is_empty()))
-        .unwrap_or("ANDROID_VR")
+        .unwrap_or("VISIONOS")
         .to_uppercase();
 
     match raw.as_str() {
+        "VISIONOS" => (CLIENT_VISIONOS.name, CLIENT_VISIONOS.user_agent),
         "ANDROID_VR" => (CLIENT_ANDROID_VR.name, CLIENT_ANDROID_VR.user_agent),
         "ANDROID" => (CLIENT_ANDROID.name, CLIENT_ANDROID.user_agent),
         "IOS" | "IOS_HDR" => (CLIENT_IOS.name, CLIENT_IOS.user_agent),
@@ -154,17 +183,31 @@ pub fn resolve_client_user_agent(
         ),
         "TVHTML5" => (CLIENT_TVHTML5.name, CLIENT_TVHTML5.user_agent),
         "WEB_EMBEDDED_PLAYER" => (CLIENT_WEB_EMBED.name, CLIENT_WEB_EMBED.user_agent),
+        "WEB_REMIX" => (MUSIC_CLIENT_NAME, MUSIC_USER_AGENT),
         "WEB" => (CLIENT_WEB.name, CLIENT_WEB.user_agent),
+        _ if raw.contains("VISION") => (CLIENT_VISIONOS.name, CLIENT_VISIONOS.user_agent),
         _ if raw.contains("IOS") => (CLIENT_IOS.name, CLIENT_IOS.user_agent),
         _ if raw.contains("VR") => (CLIENT_ANDROID_VR.name, CLIENT_ANDROID_VR.user_agent),
         _ if raw.contains("ANDROID") => (CLIENT_ANDROID.name, CLIENT_ANDROID.user_agent),
+        _ if raw.contains("REMIX") => (MUSIC_CLIENT_NAME, MUSIC_USER_AGENT),
         _ if raw.contains("TVHTML5_SIMPLY") => (
             CLIENT_TVHTML5_SIMPLY_EMBED.name,
             CLIENT_TVHTML5_SIMPLY_EMBED.user_agent,
         ),
         _ if raw.contains("TV") => (CLIENT_TVHTML5.name, CLIENT_TVHTML5.user_agent),
-        _ => (CLIENT_ANDROID_VR.name, CLIENT_ANDROID_VR.user_agent),
+        _ => (CLIENT_VISIONOS.name, CLIENT_VISIONOS.user_agent),
     }
+}
+
+/// Extracts the signed `c=` InnerTube client identifier from a googlevideo.com stream URL.
+pub fn extract_url_client_param(raw_url: &str) -> Option<String> {
+    Url::parse(raw_url).ok().and_then(|parsed| {
+        parsed
+            .query_pairs()
+            .find(|(k, _)| k == "c")
+            .map(|(_, v)| v.into_owned())
+            .filter(|s| !s.is_empty())
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -336,11 +379,70 @@ pub struct CommentsResult {
     pub continuation_token: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShortVideoItem {
+    pub id: String,
+    pub title: String,
+    pub channel: String,
+    pub channel_id: Option<String>,
+    pub channel_avatar: Option<String>,
+    pub thumbnail: String,
+    pub like_count_text: Option<String>,
+    pub comment_count_text: Option<String>,
+    pub view_count_text: Option<String>,
+    pub published_text: Option<String>,
+    pub params: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShortsFeedResult {
+    pub items: Vec<ShortVideoItem>,
+    pub continuation_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MusicTrackItem {
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+    pub duration_text: String,
+    pub duration_sec: i64,
+    pub thumbnail: String,
+    pub playlist_id: Option<String>,
+    pub explicit: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MusicShelf {
+    pub title: String,
+    pub items: Vec<MusicTrackItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MusicAudioStreamResult {
+    pub video_id: String,
+    pub title: String,
+    pub artist: String,
+    pub duration_sec: i64,
+    pub thumbnail: String,
+    pub proxy_audio_url: String,
+    pub mime_type: String,
+    pub bitrate: i64,
+    pub radio_tracks: Vec<MusicTrackItem>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct IosStreamingData {
     pub hls_manifest_url: Option<String>,
     pub adaptive_formats: Vec<Value>,
     pub formats: Vec<Value>,
+    pub client_name: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -438,6 +540,10 @@ impl YouTubeService {
             "gl": country,
         });
 
+        if let Some(sdk) = client_cfg.android_sdk_version {
+            client_ctx["androidSdkVersion"] = json!(sdk);
+        }
+
         if let Some(ref vd) = visitor {
             client_ctx["visitorData"] = Value::String(vd.clone());
         }
@@ -516,6 +622,34 @@ impl YouTubeService {
         Ok(parsed)
     }
 
+    async fn ensure_visitor_data(&self) {
+        let has_vd = self
+            .visitor_data
+            .read()
+            .ok()
+            .and_then(|v| v.clone())
+            .is_some();
+        if has_vd {
+            return;
+        }
+        let _ = self
+            .innertube_request("browse", json!({ "browseId": "FEwhat_to_watch" }), &CLIENT_WEB)
+            .await;
+    }
+
+    async fn reroll_visitor_data(&self) {
+        if let Ok(mut guard) = self.visitor_data.write() {
+            *guard = None;
+        }
+        if let Ok(mut cache) = self.player_cache.write() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.ios_cache.write() {
+            cache.clear();
+        }
+        self.ensure_visitor_data().await;
+    }
+
     fn is_playable(resp: &Value) -> bool {
         let status = resp
             .get("playabilityStatus")
@@ -544,12 +678,12 @@ impl YouTubeService {
         let has_formats = streaming
             .get("formats")
             .and_then(|v| v.as_array())
-            .map(|a| !a.is_empty())
+            .map(|a| a.iter().any(|f| extract_format_url(f).is_some()))
             .unwrap_or(false);
         let has_adaptive = streaming
             .get("adaptiveFormats")
             .and_then(|v| v.as_array())
-            .map(|a| !a.is_empty())
+            .map(|a| a.iter().any(|f| extract_format_url(f).is_some()))
             .unwrap_or(false);
 
         has_formats || has_adaptive
@@ -564,12 +698,15 @@ impl YouTubeService {
             }
         }
 
+        self.ensure_visitor_data().await;
+
         let fallback_clients = [
+            &CLIENT_VISIONOS,
             &CLIENT_ANDROID_VR,
-            &CLIENT_ANDROID,
-            &CLIENT_IOS,
             &CLIENT_TVHTML5_SIMPLY_EMBED,
             &CLIENT_TVHTML5,
+            &CLIENT_IOS,
+            &CLIENT_ANDROID,
             &CLIENT_WEB_EMBED,
             &CLIENT_WEB,
         ];
@@ -605,8 +742,10 @@ impl YouTubeService {
             }
         }
 
+        self.ensure_visitor_data().await;
+
         let mut best = IosStreamingData::default();
-        for client_cfg in [&CLIENT_IOS, &CLIENT_IOS_HDR] {
+        for client_cfg in [&CLIENT_VISIONOS, &CLIENT_IOS, &CLIENT_IOS_HDR] {
             let body = json!({
                 "videoId": video_id,
                 "contentCheckOk": true,
@@ -618,6 +757,7 @@ impl YouTubeService {
                     let hls = sd
                         .get("hlsManifestUrl")
                         .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
                         .map(|s| s.to_string());
                     let adaptive = sd
                         .get("adaptiveFormats")
@@ -635,6 +775,7 @@ impl YouTubeService {
                             hls_manifest_url: hls,
                             adaptive_formats: adaptive,
                             formats,
+                            client_name: Some(client_cfg.name),
                         };
                         if let Ok(mut cache) = self.ios_cache.write() {
                             cache.insert(video_id.to_string(), (Instant::now(), best.clone()));
@@ -645,6 +786,7 @@ impl YouTubeService {
                     if best.adaptive_formats.is_empty() && !adaptive.is_empty() {
                         best.adaptive_formats = adaptive;
                         best.formats = formats;
+                        best.client_name = Some(client_cfg.name);
                     }
                 }
             }
@@ -659,74 +801,125 @@ impl YouTubeService {
         best
     }
 
-    pub async fn resolve_fallback_stream_url(
+    pub async fn resolve_fallback_stream_candidates(
         &self,
         video_id: &str,
         itag: Option<i64>,
         exclude_client: Option<&str>,
-    ) -> Option<(String, &'static str, &'static str)> {
-        let candidates = [
-            &CLIENT_ANDROID,
+        audio_only_hint: bool,
+    ) -> Vec<(String, &'static str, &'static str)> {
+        if let Ok(mut cache) = self.player_cache.write() {
+            cache.remove(video_id);
+        }
+        if let Ok(mut cache) = self.ios_cache.write() {
+            cache.remove(video_id);
+        }
+
+        let exclude_upper = exclude_client.unwrap_or("").trim().to_uppercase();
+        let retry_visionos_reroll = exclude_upper == "VISIONOS";
+        if retry_visionos_reroll {
+            self.reroll_visitor_data().await;
+        } else {
+            self.ensure_visitor_data().await;
+        }
+
+        let is_audio = audio_only_hint
+            || matches!(itag, Some(139 | 140 | 141 | 249 | 250 | 251 | 599 | 600));
+
+        let mut primary_out: Vec<(String, &'static str, &'static str)> = Vec::new();
+        let mut muxed_out: Vec<(String, &'static str, &'static str)> = Vec::new();
+        let mut seen: HashSet<(&'static str, i64)> = HashSet::new();
+
+        let primary_clients = [
+            &CLIENT_VISIONOS,
             &CLIENT_ANDROID_VR,
-            &CLIENT_IOS,
             &CLIENT_TVHTML5_SIMPLY_EMBED,
+            &CLIENT_TVHTML5,
         ];
 
-        for client_cfg in candidates {
-            if let Some(excl) = exclude_client {
-                if client_cfg.name.eq_ignore_ascii_case(excl) {
-                    continue;
-                }
+        for client_cfg in primary_clients {
+            if !retry_visionos_reroll && client_cfg.name.eq_ignore_ascii_case(&exclude_upper) {
+                continue;
             }
-
             let body = json!({
                 "videoId": video_id,
                 "contentCheckOk": true,
                 "racyCheckOk": true
             });
-
             if let Ok(resp) = self.innertube_request("player", body, client_cfg).await {
-                if !Self::is_playable(&resp) {
-                    continue;
-                }
-
-                let mut all_fmts = Vec::new();
-                if let Some(fmts) = resp
-                    .get("streamingData")
-                    .and_then(|sd| sd.get("formats"))
-                    .and_then(|f| f.as_array())
-                {
-                    all_fmts.extend(fmts.iter());
-                }
-                if let Some(afmts) = resp
-                    .get("streamingData")
-                    .and_then(|sd| sd.get("adaptiveFormats"))
-                    .and_then(|f| f.as_array())
-                {
-                    all_fmts.extend(afmts.iter());
-                }
-
-                let matched = if let Some(target_itag) = itag {
-                    all_fmts
-                        .iter()
-                        .find(|f| {
-                            f.get("itag").and_then(|v| v.as_i64()) == Some(target_itag)
-                                && extract_format_url(f).is_some()
-                        })
-                        .or_else(|| all_fmts.iter().find(|f| extract_format_url(f).is_some()))
-                } else {
-                    all_fmts.iter().find(|f| extract_format_url(f).is_some())
-                };
-
-                if let Some(fmt) = matched {
-                    if let Some(url) = extract_format_url(fmt) {
-                        return Some((url, client_cfg.name, client_cfg.user_agent));
-                    }
-                }
+                collect_fallback_candidates_from_resp(
+                    &resp,
+                    client_cfg.name,
+                    itag,
+                    is_audio,
+                    &mut seen,
+                    &mut primary_out,
+                    &mut muxed_out,
+                );
             }
         }
 
-        None
+        if self.auth.is_signed_in() && exclude_upper != "TVHTML5" {
+            if let Ok(resp) = self
+                .innertube_tv_auth_request(
+                    "player",
+                    json!({
+                        "videoId": video_id,
+                        "contentCheckOk": true,
+                        "racyCheckOk": true
+                    }),
+                )
+                .await
+            {
+                collect_fallback_candidates_from_resp(
+                    &resp,
+                    CLIENT_TVHTML5.name,
+                    itag,
+                    is_audio,
+                    &mut seen,
+                    &mut primary_out,
+                    &mut muxed_out,
+                );
+            }
+        }
+
+        let legacy_clients = [&CLIENT_IOS, &CLIENT_ANDROID];
+        for client_cfg in legacy_clients {
+            let skip_direct = client_cfg.name.eq_ignore_ascii_case(&exclude_upper);
+            let body = json!({
+                "videoId": video_id,
+                "contentCheckOk": true,
+                "racyCheckOk": true
+            });
+            if let Ok(resp) = self.innertube_request("player", body, client_cfg).await {
+                if skip_direct {
+                    if is_audio {
+                        collect_fallback_candidates_from_resp(
+                            &resp,
+                            client_cfg.name,
+                            itag,
+                            is_audio,
+                            &mut seen,
+                            &mut Vec::new(),
+                            &mut muxed_out,
+                        );
+                    }
+                    continue;
+                }
+                collect_fallback_candidates_from_resp(
+                    &resp,
+                    client_cfg.name,
+                    itag,
+                    is_audio,
+                    &mut seen,
+                    &mut primary_out,
+                    &mut muxed_out,
+                );
+            }
+        }
+
+        primary_out.extend(muxed_out);
+        primary_out
     }
 
     pub async fn fetch_sponsor_segments(&self, video_id: &str) -> Vec<SponsorBlockSegment> {
@@ -865,54 +1058,16 @@ impl YouTubeService {
         );
 
         let mut player_resp = player_res?;
+        merge_streaming_formats(&mut player_resp, &ios_data);
 
-        // Merge iOS adaptiveFormats & muxed formats cleanly without duplicates
-        if let Some(sd) = player_resp.get_mut("streamingData").and_then(|v| v.as_object_mut()) {
-            if !ios_data.adaptive_formats.is_empty() {
-                let adaptive_entry = sd
-                    .entry("adaptiveFormats".to_string())
-                    .or_insert_with(|| Value::Array(Vec::new()));
-                if let Some(arr) = adaptive_entry.as_array_mut() {
-                    let existing: HashSet<i64> = arr
-                        .iter()
-                        .filter_map(|f| f.get("itag").and_then(|v| v.as_i64()))
-                        .collect();
-                    for fmt in &ios_data.adaptive_formats {
-                        if let Some(itag) = fmt.get("itag").and_then(|v| v.as_i64()) {
-                            if !existing.contains(&itag) {
-                                arr.push(fmt.clone());
-                            }
-                        }
-                    }
-                }
-            }
-
-            if !ios_data.formats.is_empty() {
-                let formats_entry = sd
-                    .entry("formats".to_string())
-                    .or_insert_with(|| Value::Array(Vec::new()));
-                if let Some(arr) = formats_entry.as_array_mut() {
-                    let existing: HashSet<i64> = arr
-                        .iter()
-                        .filter_map(|f| f.get("itag").and_then(|v| v.as_i64()))
-                        .collect();
-                    for fmt in &ios_data.formats {
-                        if let Some(itag) = fmt.get("itag").and_then(|v| v.as_i64()) {
-                            if !existing.contains(&itag) {
-                                arr.push(fmt.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let raw_hls_url = player_resp
+        let player_hls = player_resp
             .get("streamingData")
             .and_then(|sd| sd.get("hlsManifestUrl"))
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .or_else(|| ios_data.hls_manifest_url.clone());
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        let hls_from_player = player_hls.is_some();
+        let raw_hls_url = player_hls.or_else(|| ios_data.hls_manifest_url.clone());
 
         let parsed = parse_stream_formats(player_resp.get("streamingData"));
         let target_h = target_quality.unwrap_or(1080);
@@ -929,27 +1084,50 @@ impl YouTubeService {
 
         let chosen_video = selected.video.as_ref().or(selected.muxed.as_ref());
         let proxy_video_url = chosen_video.map(|v| {
+            let client = extract_url_client_param(&v.url)
+                .unwrap_or_else(|| CLIENT_VISIONOS.name.to_string());
             format!(
-                "http://127.0.0.1:8989/stream?url={}&id={}&itag={}",
+                "http://127.0.0.1:8989/stream?url={}&client={}&id={}&itag={}",
                 urlencoding::encode(&v.url),
+                urlencoding::encode(&client),
                 urlencoding::encode(&video_id),
                 v.itag
             )
         });
 
         let proxy_audio_url = selected.audio.as_ref().map(|a| {
+            let client = extract_url_client_param(&a.url)
+                .unwrap_or_else(|| CLIENT_VISIONOS.name.to_string());
             format!(
-                "http://127.0.0.1:8989/stream?url={}&id={}&itag={}",
+                "http://127.0.0.1:8989/stream?url={}&client={}&id={}&itag={}",
                 urlencoding::encode(&a.url),
+                urlencoding::encode(&client),
                 urlencoding::encode(&video_id),
                 a.itag
             )
         });
 
+        let hls_client_name = if hls_from_player {
+            parsed
+                .video_only
+                .first()
+                .map(|v| v.url.as_str())
+                .or_else(|| parsed.audio_only.first().map(|a| a.url.as_str()))
+                .or_else(|| parsed.muxed.first().map(|m| m.url.as_str()))
+                .and_then(extract_url_client_param)
+                .unwrap_or_else(|| CLIENT_VISIONOS.name.to_string())
+        } else {
+            ios_data
+                .client_name
+                .unwrap_or(CLIENT_VISIONOS.name)
+                .to_string()
+        };
+
         let proxy_hls_url = raw_hls_url.as_ref().map(|hls| {
             format!(
-                "http://127.0.0.1:8989/hls-manifest?url={}&id={}",
+                "http://127.0.0.1:8989/hls-manifest?url={}&client={}&id={}",
                 urlencoding::encode(hls),
+                urlencoding::encode(&hls_client_name),
                 urlencoding::encode(&video_id)
             )
         });
@@ -1558,6 +1736,499 @@ impl YouTubeService {
 
         Ok(())
     }
+
+    pub async fn rate_video(&self, video_id: &str, like: bool) -> Result<bool, String> {
+        let vid = Self::extract_video_id(video_id)?;
+        let endpoint = if like { "like/like" } else { "like/removelike" };
+        self.innertube_tv_auth_request(endpoint, json!({ "target": { "videoId": vid } }))
+            .await?;
+        Ok(like)
+    }
+
+    pub async fn get_shorts_feed(
+        &self,
+        continuation: Option<String>,
+    ) -> Result<ShortsFeedResult, String> {
+        if let Some(token) = continuation.filter(|s| !s.trim().is_empty()) {
+            return self.fetch_reel_sequence(&token).await;
+        }
+
+        let mut items = Vec::new();
+        let mut seen = HashSet::new();
+
+        // If signed in, pull recent Shorts from Subscriptions on TVHTML5 first
+        if self.auth.is_signed_in() {
+            if let Ok(subs_resp) = self
+                .innertube_tv_auth_request("browse", json!({ "browseId": "FEsubscriptions" }))
+                .await
+            {
+                let mut sub_shorts = Vec::new();
+                collect_tv_subscribed_shorts(&subs_resp, &mut sub_shorts, &mut seen);
+                items.extend(sub_shorts);
+            }
+        }
+
+        // Seedless Shorts request (matching MeeTube BrowseApiHelper.getReelQuery)
+        let seed_resp = self
+            .innertube_request(
+                "reel/reel_item_watch",
+                json!({
+                    "disablePlayerResponse": true,
+                    "inputType": "REEL_WATCH_INPUT_TYPE_SEEDLESS",
+                    "params": "CA8%3D"
+                }),
+                &CLIENT_WEB,
+            )
+            .await?;
+
+        if let Some(seed_vid) = seed_resp
+            .pointer("/replacementEndpoint/reelWatchEndpoint/videoId")
+            .and_then(|v| v.as_str())
+            .filter(|v| is_valid_video_id(v))
+        {
+            let seed_params = seed_resp
+                .pointer("/replacementEndpoint/reelWatchEndpoint/params")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let mut seed_item = ShortVideoItem {
+                id: seed_vid.to_string(),
+                title: String::new(),
+                channel: String::new(),
+                channel_id: None,
+                channel_avatar: None,
+                thumbnail: format!("https://i.ytimg.com/vi/{seed_vid}/oar2.jpg"),
+                like_count_text: None,
+                comment_count_text: None,
+                view_count_text: None,
+                published_text: None,
+                params: seed_params,
+            };
+            parse_reel_overlay_metadata(&seed_resp, &mut seed_item);
+            if seed_item.title.is_empty() {
+                seed_item.title = format!("YouTube Shorts #{seed_vid}");
+            }
+            if seed_item.channel.is_empty() {
+                seed_item.channel = "YouTube Shorts".to_string();
+            }
+            if seen.insert(seed_item.id.clone()) {
+                items.push(seed_item);
+            }
+        }
+
+        let seq_token = seed_resp
+            .get("sequenceContinuation")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                seed_resp
+                    .pointer("/continuationEndpoint/reelWatchSequenceEndpoint/sequenceParams")
+                    .and_then(|v| v.as_str())
+            })
+            .or_else(|| {
+                seed_resp
+                    .pointer("/continuationEndpoint/continuationCommand/token")
+                    .and_then(|v| v.as_str())
+            })
+            .map(|s| s.to_string());
+
+        let mut next_token = None;
+        if let Some(tok) = seq_token {
+            if let Ok(seq_res) = self.fetch_reel_sequence(&tok).await {
+                next_token = seq_res.continuation_token;
+                for item in seq_res.items {
+                    if seen.insert(item.id.clone()) {
+                        items.push(item);
+                    }
+                }
+            }
+        }
+
+        if items.is_empty() {
+            return Err("Không tải được danh sách YouTube Shorts".to_string());
+        }
+
+        Ok(ShortsFeedResult {
+            items,
+            continuation_token: next_token,
+        })
+    }
+
+    async fn fetch_reel_sequence(&self, seq_token: &str) -> Result<ShortsFeedResult, String> {
+        let resp = self
+            .innertube_request(
+                "reel/reel_watch_sequence",
+                json!({ "sequenceParams": seq_token }),
+                &CLIENT_WEB,
+            )
+            .await?;
+
+        let mut drafts: Vec<ShortVideoItem> = Vec::new();
+        let mut seen = HashSet::new();
+
+        if let Some(entries) = resp.get("entries").and_then(|v| v.as_array()) {
+            for entry in entries {
+                let endpoint = match entry.pointer("/command/reelWatchEndpoint") {
+                    Some(ep) => ep,
+                    None => continue,
+                };
+                if endpoint
+                    .pointer("/adClientParams/isAd")
+                    .and_then(|v| v.as_bool())
+                    == Some(true)
+                {
+                    continue;
+                }
+                let Some(vid) = endpoint.get("videoId").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if !is_valid_video_id(vid) || !seen.insert(vid.to_string()) {
+                    continue;
+                }
+
+                let params = endpoint
+                    .get("params")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let thumb = endpoint
+                    .pointer("/thumbnail/thumbnails/0/url")
+                    .and_then(|v| v.as_str())
+                    .map(normalize_thumb_url)
+                    .unwrap_or_else(|| format!("https://i.ytimg.com/vi/{vid}/oar2.jpg"));
+
+                let mut item = ShortVideoItem {
+                    id: vid.to_string(),
+                    title: String::new(),
+                    channel: String::new(),
+                    channel_id: None,
+                    channel_avatar: None,
+                    thumbnail: thumb,
+                    like_count_text: None,
+                    comment_count_text: None,
+                    view_count_text: None,
+                    published_text: None,
+                    params: params.clone(),
+                };
+
+                if let Some(pr) = entry.pointer("/unserializedPrefetchData/playerResponse") {
+                    parse_short_prefetch_player(pr, &mut item);
+                }
+                if let Some(watch_resp) =
+                    entry.pointer("/unserializedPrefetchData/reelItemWatchResponse")
+                {
+                    parse_reel_overlay_metadata(watch_resp, &mut item);
+                }
+
+                drafts.push(item);
+            }
+        }
+
+        // Concurrently fetch missing titles/channel/actions via reel_item_watch for entries without complete metadata
+        let enrich_indices: Vec<usize> = drafts
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| it.title.is_empty() || it.channel.is_empty())
+            .take(8)
+            .map(|(idx, _)| idx)
+            .collect();
+
+        if !enrich_indices.is_empty() {
+            let futs = enrich_indices.iter().map(|&idx| {
+                let vid = drafts[idx].id.clone();
+                let params = drafts[idx].params.clone();
+                async move {
+                    let mut body = json!({
+                        "disablePlayerResponse": true,
+                        "playerRequest": { "videoId": vid }
+                    });
+                    if let Some(p) = params {
+                        body["params"] = Value::String(p);
+                    }
+                    let res = self
+                        .innertube_request("reel/reel_item_watch", body, &CLIENT_WEB)
+                        .await;
+                    (idx, res)
+                }
+            });
+
+            let enriched = futures_util::future::join_all(futs).await;
+            for (idx, res) in enriched {
+                if let Ok(watch_json) = res {
+                    parse_reel_overlay_metadata(&watch_json, &mut drafts[idx]);
+                }
+            }
+        }
+
+        for item in &mut drafts {
+            if item.title.is_empty() {
+                item.title = format!("YouTube Shorts #{}", item.id);
+            }
+            if item.channel.is_empty() {
+                item.channel = "YouTube Shorts".to_string();
+            }
+        }
+
+        let next_token = resp
+            .pointer("/continuationEndpoint/continuationCommand/token")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                resp.pointer("/continuationEndpoint/reelWatchSequenceEndpoint/sequenceParams")
+                    .and_then(|v| v.as_str())
+            })
+            .or_else(|| resp.get("sequenceContinuation").and_then(|v| v.as_str()))
+            .map(|s| s.to_string());
+
+        Ok(ShortsFeedResult {
+            items: drafts,
+            continuation_token: next_token,
+        })
+    }
+
+    async fn innertube_music_request(
+        &self,
+        endpoint: &str,
+        mut body: Value,
+    ) -> Result<Value, String> {
+        let visitor = self.visitor_data.read().ok().and_then(|v| v.clone());
+        let mut client_ctx = json!({
+            "clientName": MUSIC_CLIENT_NAME,
+            "clientVersion": MUSIC_CLIENT_VERSION,
+            "hl": "vi",
+            "gl": "VN"
+        });
+        if let Some(ref vd) = visitor {
+            client_ctx["visitorData"] = Value::String(vd.clone());
+        }
+
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("context".to_string(), json!({ "client": client_ctx }));
+        }
+
+        let url = format!("{MUSIC_INNERTUBE_BASE}{endpoint}?prettyPrint=false");
+        let mut req = self
+            .http
+            .post(&url)
+            .header("User-Agent", MUSIC_USER_AGENT)
+            .header("Content-Type", "application/json")
+            .header("Origin", "https://music.youtube.com")
+            .header("X-Origin", "https://music.youtube.com")
+            .header("Referer", "https://music.youtube.com/")
+            .header("Accept-Language", "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7")
+            .header("X-YouTube-Client-Name", MUSIC_CLIENT_ID)
+            .header("X-YouTube-Client-Version", MUSIC_CLIENT_VERSION);
+
+        if let Some(ref vd) = visitor {
+            req = req.header("X-Goog-Visitor-Id", vd);
+        }
+
+        let res = req
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Lỗi gọi YouTube Music ({endpoint}): {e}"))?;
+
+        if !res.status().is_success() {
+            let status = res.status().as_u16();
+            let txt = res.text().await.unwrap_or_default();
+            let preview: String = txt.chars().take(240).collect();
+            return Err(format!("YouTube Music HTTP {status} ({endpoint}): {preview}"));
+        }
+
+        res.json::<Value>()
+            .await
+            .map_err(|e| format!("JSON YouTube Music không hợp lệ: {e}"))
+    }
+
+    pub async fn get_music_home(&self) -> Result<Vec<MusicShelf>, String> {
+        let mut shelves = Vec::new();
+        if let Ok(resp) = self
+            .innertube_music_request("browse", json!({ "browseId": "FEmusic_home" }))
+            .await
+        {
+            if let Some(contents) = resp.get("contents") {
+                walk_music_shelves(contents, &mut shelves);
+            } else {
+                walk_music_shelves(&resp, &mut shelves);
+            }
+        }
+
+        shelves.retain(|s| !s.items.is_empty());
+
+        // Anonymous FEmusic_home sometimes only returns mood tiles without playable tracks;
+        // enrich concurrently with curated YouTube Music song search shelves.
+        if shelves.len() < 2 {
+            let presets = [
+                ("Nhạc Việt Thịnh Hành", "Nhac Viet Hot Thinh Hanh"),
+                ("V-Pop Chill & Acoustic", "V-Pop Chill Acoustic"),
+                ("Top Hits Quốc Tế", "Top Hits 2026 Official Audio"),
+            ];
+            let futs = presets.iter().map(|(label, query)| async move {
+                let items = self
+                    .search_music(query, Some("songs"))
+                    .await
+                    .unwrap_or_default();
+                ((*label).to_string(), items)
+            });
+            let extras = futures_util::future::join_all(futs).await;
+            for (label, mut items) in extras {
+                if !items.is_empty() {
+                    items.truncate(12);
+                    shelves.push(MusicShelf {
+                        title: label,
+                        items,
+                    });
+                }
+            }
+        }
+
+        Ok(shelves)
+    }
+
+    pub async fn search_music(
+        &self,
+        query: &str,
+        filter: Option<&str>,
+    ) -> Result<Vec<MusicTrackItem>, String> {
+        let filter_params = match filter.unwrap_or("songs") {
+            "all" => None,
+            "videos" => Some("EgWKAQIQAWoMEA4QChADEAQQCRAF"),
+            _ => Some("EgWKAQIIAWoMEA4QChADEAQQCRAF"),
+        };
+
+        let mut body = json!({ "query": query });
+        if let Some(p) = filter_params {
+            body["params"] = Value::String(p.to_string());
+        }
+
+        let resp = self.innertube_music_request("search", body).await?;
+        let mut tracks = Vec::new();
+        let mut seen = HashSet::new();
+        if let Some(contents) = resp.get("contents") {
+            walk_music_tracks(contents, &mut tracks, &mut seen);
+        } else {
+            walk_music_tracks(&resp, &mut tracks, &mut seen);
+        }
+
+        Ok(tracks)
+    }
+
+    pub async fn get_music_radio(
+        &self,
+        video_id: &str,
+        playlist_id: Option<&str>,
+    ) -> Result<Vec<MusicTrackItem>, String> {
+        let vid = Self::extract_video_id(video_id)?;
+        let pid = playlist_id
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("RDAMVM{vid}"));
+
+        let resp = self
+            .innertube_music_request(
+                "next",
+                json!({
+                    "videoId": vid,
+                    "playlistId": pid,
+                    "isAudioOnly": true
+                }),
+            )
+            .await?;
+
+        let mut tracks = Vec::new();
+        let mut seen = HashSet::new();
+        walk_music_panel_tracks(&resp, &mut tracks, &mut seen);
+        Ok(tracks)
+    }
+
+    pub async fn get_music_audio_stream(
+        &self,
+        video_id: &str,
+        playlist_id: Option<&str>,
+    ) -> Result<MusicAudioStreamResult, String> {
+        let vid = Self::extract_video_id(video_id)?;
+
+        let (player_res, radio_res) = tokio::join!(
+            self.resolve_player(&vid),
+            self.get_music_radio(&vid, playlist_id)
+        );
+
+        let mut player_resp = player_res?;
+        let mut parsed = parse_stream_formats(player_resp.get("streamingData"));
+
+        if parsed.audio_only.is_empty() {
+            let ios_data = self.fetch_ios_streaming_data(&vid).await;
+            merge_streaming_formats(&mut player_resp, &ios_data);
+            parsed = parse_stream_formats(player_resp.get("streamingData"));
+        }
+
+        let best_audio = select_best_audio(&parsed.audio_only);
+
+        let (raw_url, itag, mime_type, bitrate) = if let Some(audio) = best_audio {
+            (audio.url, audio.itag, audio.mime_type, audio.bitrate)
+        } else if let Some(muxed) = parsed
+            .muxed
+            .iter()
+            .find(|m| m.itag == 18)
+            .or_else(|| parsed.muxed.first())
+        {
+            (
+                muxed.url.clone(),
+                muxed.itag,
+                muxed.mime_type.clone(),
+                muxed.bitrate,
+            )
+        } else {
+            return Err("Không tìm thấy luồng âm thanh cho bài hát này".to_string());
+        };
+
+        let resolved_client = extract_url_client_param(&raw_url)
+            .unwrap_or_else(|| CLIENT_VISIONOS.name.to_string());
+
+        let proxy_audio_url = format!(
+            "http://127.0.0.1:8989/stream?url={}&client={}&id={}&itag={}",
+            urlencoding::encode(&raw_url),
+            urlencoding::encode(&resolved_client),
+            urlencoding::encode(&vid),
+            itag
+        );
+
+        let vd = player_resp.get("videoDetails");
+        let title = vd
+            .and_then(|d| d.get("title"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("YouTube Music")
+            .to_string();
+        let artist = vd
+            .and_then(|d| d.get("author"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown Artist")
+            .to_string();
+        let duration_sec = vd
+            .and_then(|d| d.get("lengthSeconds"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        let thumbnail = vd
+            .and_then(|d| d.pointer("/thumbnail/thumbnails"))
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.last())
+            .and_then(|t| t.get("url"))
+            .and_then(|v| v.as_str())
+            .map(|u| upgrade_music_thumb(u, 544))
+            .unwrap_or_else(|| format!("https://i.ytimg.com/vi/{vid}/hqdefault.jpg"));
+
+        let radio_tracks = radio_res.unwrap_or_default();
+
+        Ok(MusicAudioStreamResult {
+            video_id: vid,
+            title,
+            artist,
+            duration_sec,
+            thumbnail,
+            proxy_audio_url,
+            mime_type,
+            bitrate,
+            radio_tracks,
+        })
+    }
 }
 
 fn now_unix_ms() -> i64 {
@@ -2008,24 +2679,156 @@ fn find_best_video(
     pool.first().map(|v| (*v).clone())
 }
 
+fn merge_streaming_formats(player_resp: &mut Value, ios_data: &IosStreamingData) {
+    let Some(sd) = player_resp
+        .get_mut("streamingData")
+        .and_then(|v| v.as_object_mut())
+    else {
+        return;
+    };
+
+    for (key, extra_formats) in [
+        ("adaptiveFormats", &ios_data.adaptive_formats),
+        ("formats", &ios_data.formats),
+    ] {
+        if extra_formats.is_empty() {
+            continue;
+        }
+        let entry = sd
+            .entry(key.to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Some(arr) = entry.as_array_mut() {
+            let existing: HashSet<i64> = arr
+                .iter()
+                .filter_map(|f| f.get("itag").and_then(|v| v.as_i64()))
+                .collect();
+            for fmt in extra_formats {
+                if let Some(itag) = fmt.get("itag").and_then(|v| v.as_i64()) {
+                    if !existing.contains(&itag) {
+                        arr.push(fmt.clone());
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn push_stream_candidate(
+    raw_url: String,
+    fmt_itag: i64,
+    client_hint: &'static str,
+    seen: &mut HashSet<(&'static str, i64)>,
+    out: &mut Vec<(String, &'static str, &'static str)>,
+) {
+    let url_client = extract_url_client_param(&raw_url);
+    let (resolved_client, resolved_ua) =
+        resolve_client_user_agent(url_client.as_deref(), Some(client_hint));
+    if seen.insert((resolved_client, fmt_itag)) {
+        out.push((raw_url, resolved_client, resolved_ua));
+    }
+}
+
+fn collect_fallback_candidates_from_resp(
+    resp: &Value,
+    client_hint: &'static str,
+    itag: Option<i64>,
+    is_audio: bool,
+    seen: &mut HashSet<(&'static str, i64)>,
+    primary_out: &mut Vec<(String, &'static str, &'static str)>,
+    muxed_out: &mut Vec<(String, &'static str, &'static str)>,
+) {
+    if !YouTubeService::is_playable(resp) {
+        return;
+    }
+
+    let parsed = parse_stream_formats(resp.get("streamingData"));
+
+    if is_audio {
+        if let Some(target_itag) = itag {
+            if let Some(exact) = parsed.audio_only.iter().find(|f| f.itag == target_itag) {
+                push_stream_candidate(exact.url.clone(), exact.itag, client_hint, seen, primary_out);
+            }
+        }
+        if let Some(best) = select_best_audio(&parsed.audio_only) {
+            push_stream_candidate(best.url, best.itag, client_hint, seen, primary_out);
+        }
+        if let Some(mux_18) = parsed
+            .muxed
+            .iter()
+            .find(|m| m.itag == 18)
+            .or_else(|| parsed.muxed.first())
+        {
+            push_stream_candidate(
+                mux_18.url.clone(),
+                mux_18.itag,
+                client_hint,
+                seen,
+                muxed_out,
+            );
+        }
+        return;
+    }
+
+    if let Some(target_itag) = itag {
+        if let Some(v) = parsed
+            .video_only
+            .iter()
+            .chain(parsed.muxed.iter())
+            .find(|f| f.itag == target_itag)
+        {
+            push_stream_candidate(v.url.clone(), v.itag, client_hint, seen, primary_out);
+            return;
+        }
+        if let Some(a) = parsed.audio_only.iter().find(|f| f.itag == target_itag) {
+            push_stream_candidate(a.url.clone(), a.itag, client_hint, seen, primary_out);
+            return;
+        }
+    }
+
+    if let Some(m) = parsed.muxed.first() {
+        push_stream_candidate(m.url.clone(), m.itag, client_hint, seen, primary_out);
+    } else if let Some(v) = parsed.video_only.first() {
+        push_stream_candidate(v.url.clone(), v.itag, client_hint, seen, primary_out);
+    }
+}
+
 fn select_best_audio(candidates: &[AudioStreamFormat]) -> Option<AudioStreamFormat> {
     if candidates.is_empty() {
         return None;
     }
 
+    let supported: Vec<&AudioStreamFormat> = candidates
+        .iter()
+        .filter(|fmt| {
+            let mime = fmt.mime_type.to_lowercase();
+            mime.starts_with("audio/mp4") || mime.starts_with("audio/webm")
+        })
+        .collect();
+
+    let mut sorted: Vec<&AudioStreamFormat> = if supported.is_empty() {
+        candidates.iter().collect()
+    } else {
+        supported
+    };
+
     let score = |fmt: &AudioStreamFormat| -> i32 {
         if fmt.itag == 140 {
             return 1000;
         }
+        if fmt.itag == 251 {
+            return 850;
+        }
         let mime = fmt.mime_type.to_lowercase();
         let codec = fmt.codec.to_lowercase();
-        if fmt.container == "m4a" || mime.contains("audio/mp4") || codec.contains("mp4a") {
-            return 500;
+        if fmt.container == "m4a" || mime.starts_with("audio/mp4") || codec.contains("mp4a") {
+            return 600;
+        }
+        if fmt.container == "webm" || mime.starts_with("audio/webm") || codec.contains("opus") {
+            return 450;
         }
         100
     };
 
-    let mut sorted: Vec<&AudioStreamFormat> = candidates.iter().collect();
     sorted.sort_by(|a, b| {
         b.is_original
             .unwrap_or(true)
@@ -2795,4 +3598,897 @@ fn parse_single_comment(renderer: &Value) -> Option<VideoComment> {
         pinned,
         reply_count,
     })
+}
+
+fn collect_tv_subscribed_shorts(
+    val: &Value,
+    list: &mut Vec<ShortVideoItem>,
+    seen: &mut HashSet<String>,
+) {
+    match val {
+        Value::Object(map) => {
+            if let Some(tabs) = map.get("tabs").and_then(|t| t.as_array()) {
+                let selected_tab = tabs
+                    .iter()
+                    .find(|t| {
+                        t.pointer("/tabRenderer/selected").and_then(|v| v.as_bool()) == Some(true)
+                    })
+                    .or_else(|| tabs.first());
+                if let Some(tab) = selected_tab {
+                    collect_tv_subscribed_shorts(tab, list, seen);
+                }
+                return;
+            }
+            if let Some(tile) = map.get("tileRenderer") {
+                let is_reel_cmd = tile.pointer("/onSelectCommand/reelWatchEndpoint/videoId").is_some();
+                let is_shorts_style =
+                    tile.get("style").and_then(|v| v.as_str()) == Some("TILE_STYLE_YTLR_SHORTS");
+                if is_reel_cmd || is_shorts_style {
+                    if let Some(parsed) = parse_tile_renderer(tile) {
+                        if seen.insert(parsed.id.clone()) {
+                            list.push(ShortVideoItem {
+                                id: parsed.id.clone(),
+                                title: parsed.title,
+                                channel: parsed.channel,
+                                channel_id: parsed.channel_id,
+                                channel_avatar: None,
+                                thumbnail: format!("https://i.ytimg.com/vi/{}/oar2.jpg", parsed.id),
+                                like_count_text: None,
+                                comment_count_text: None,
+                                view_count_text: if parsed.view_count_text.is_empty() {
+                                    None
+                                } else {
+                                    Some(parsed.view_count_text)
+                                },
+                                published_text: parsed.published_text,
+                                params: None,
+                            });
+                        }
+                    }
+                }
+                return;
+            }
+            for child in map.values() {
+                collect_tv_subscribed_shorts(child, list, seen);
+            }
+        }
+        Value::Array(arr) => {
+            for child in arr {
+                collect_tv_subscribed_shorts(child, list, seen);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_short_prefetch_player(pr: &Value, item: &mut ShortVideoItem) {
+    if let Some(vd) = pr.get("videoDetails") {
+        if item.title.is_empty() {
+            if let Some(t) = vd.get("title").and_then(|v| v.as_str()) {
+                item.title = t.to_string();
+            }
+        }
+        if item.channel.is_empty() {
+            if let Some(ch) = vd.get("author").and_then(|v| v.as_str()) {
+                item.channel = ch.to_string();
+            }
+        }
+        if item.channel_id.is_none() {
+            item.channel_id = vd
+                .get("channelId")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+        }
+        if item.view_count_text.is_none() {
+            item.view_count_text = vd
+                .get("viewCount")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+        }
+    }
+    if item.like_count_text.is_none() {
+        item.like_count_text = pr
+            .pointer("/microformat/playerMicroformatRenderer/likeCount")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+    }
+}
+
+pub fn parse_reel_overlay_metadata(resp: &Value, item: &mut ShortVideoItem) {
+    let ov = resp
+        .pointer("/overlay/reelPlayerOverlayRenderer")
+        .unwrap_or(resp);
+
+    // Modern ViewModel format (YouTube 2025+)
+    if let Some(meta_items) = ov
+        .pointer("/playerOverlay/reelPlayerOverlayViewModel/metapanel/reelMetapanelViewModel/metadataItems")
+        .and_then(|v| v.as_array())
+    {
+        for m in meta_items {
+            if let Some(ch_bar) = m.get("reelChannelBarViewModel") {
+                if let Some(ch_name) = ch_bar.pointer("/channelName/content").and_then(|v| v.as_str())
+                {
+                    if !ch_name.trim().is_empty() {
+                        item.channel = ch_name.trim().to_string();
+                    }
+                }
+                if item.channel_id.is_none() {
+                    item.channel_id = ch_bar
+                        .pointer("/channelName/commandRuns/0/onTap/innertubeCommand/browseEndpoint/browseId")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                }
+                if item.channel_avatar.is_none() {
+                    let av = ch_bar
+                        .pointer("/decoratedAvatarViewModel/decoratedAvatarViewModel/avatar/avatarViewModel/image/sources")
+                        .or_else(|| ch_bar.pointer("/decoratedAvatarViewModel/avatar/avatarViewModel/image/sources"))
+                        .and_then(|v| v.as_array())
+                        .and_then(|arr| arr.last())
+                        .and_then(|s| s.get("url"))
+                        .and_then(|u| u.as_str())
+                        .map(normalize_thumb_url);
+                    item.channel_avatar = av;
+                }
+            }
+
+            if let Some(title_vm) = m.get("shortsVideoTitleViewModel") {
+                if let Some(t) = title_vm.pointer("/text/content").and_then(|v| v.as_str()) {
+                    if !t.trim().is_empty() {
+                        item.title = t.trim().to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(buttons) = ov
+        .pointer("/playerOverlay/reelPlayerOverlayViewModel/actionBar/reelActionBarViewModel/buttonViewModels")
+        .and_then(|v| v.as_array())
+    {
+        for btn in buttons {
+            if let Some(like_btn) = btn
+                .pointer("/likeButtonViewModel/toggleButtonViewModel/toggleButtonViewModel/defaultButtonViewModel/buttonViewModel/title")
+                .or_else(|| btn.pointer("/likeButtonViewModel/toggleButtonViewModel/defaultButtonViewModel/buttonViewModel/title"))
+                .and_then(|v| v.as_str())
+            {
+                if !like_btn.trim().is_empty() {
+                    item.like_count_text = Some(like_btn.trim().to_string());
+                }
+            }
+            if let Some(bvm) = btn.get("buttonViewModel") {
+                let icon = bvm.get("iconName").and_then(|v| v.as_str()).unwrap_or("");
+                if icon.contains("COMMENT") {
+                    if let Some(cnt) = bvm.get("title").and_then(|v| v.as_str()) {
+                        if !cnt.trim().is_empty() {
+                            item.comment_count_text = Some(cnt.trim().to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Legacy reelPlayerHeaderRenderer format
+    if let Some(hdr) = ov.pointer("/reelPlayerHeaderSupportedRenderers/reelPlayerHeaderRenderer") {
+        if item.title.is_empty() {
+            let t = extract_runs_or_simple(hdr.get("reelTitleText"));
+            if !t.is_empty() {
+                item.title = t;
+            } else if let Some(acc) = hdr
+                .pointer("/accessibility/accessibilityData/label")
+                .and_then(|v| v.as_str())
+            {
+                if !acc.trim().is_empty() {
+                    item.title = acc.trim().to_string();
+                }
+            }
+        }
+        if item.channel.is_empty() {
+            let ch = extract_runs_or_simple(hdr.get("channelTitleText"));
+            if !ch.is_empty() {
+                item.channel = ch;
+            }
+        }
+        if item.channel_id.is_none() {
+            item.channel_id = hdr
+                .pointer("/channelNavigationEndpoint/browseEndpoint/browseId")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+        }
+        if item.channel_avatar.is_none() {
+            item.channel_avatar = hdr
+                .pointer("/channelThumbnail/thumbnails")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| arr.last())
+                .and_then(|t| t.get("url"))
+                .and_then(|v| v.as_str())
+                .map(normalize_thumb_url);
+        }
+        if item.published_text.is_none() {
+            let ts = extract_runs_or_simple(hdr.get("timestampText"));
+            if !ts.is_empty() {
+                item.published_text = Some(ts);
+            }
+        }
+    }
+}
+
+pub fn upgrade_music_thumb(raw: &str, size_px: u32) -> String {
+    let mut url = normalize_thumb_url(raw);
+    if let Some(pos) = url.find("=w") {
+        let rest = &url[pos + 2..];
+        let w_digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+        if w_digits > 0 && rest[w_digits..].starts_with("-h") {
+            let after_h = &rest[w_digits + 2..];
+            let h_digits = after_h.bytes().take_while(|b| b.is_ascii_digit()).count();
+            if h_digits > 0 {
+                let end = pos + 2 + w_digits + 2 + h_digits;
+                let suffix = &url[end..];
+                url = format!("{}=w{}-h{}{}", &url[..pos], size_px, size_px, suffix);
+                return url;
+            }
+        }
+    }
+    url
+}
+
+fn extract_music_thumb(renderer: &Value) -> Option<String> {
+    let url = renderer
+        .pointer("/thumbnail/musicThumbnailRenderer/thumbnail/thumbnails")
+        .or_else(|| renderer.pointer("/thumbnailRenderer/musicThumbnailRenderer/thumbnail/thumbnails"))
+        .or_else(|| renderer.pointer("/thumbnail/thumbnails"))
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.last())
+        .and_then(|t| t.get("url"))
+        .and_then(|v| v.as_str())?;
+    if url.is_empty() {
+        None
+    } else {
+        Some(upgrade_music_thumb(url, 544))
+    }
+}
+
+fn extract_watch_endpoint(val: Option<&Value>) -> (Option<String>, Option<String>) {
+    let Some(v) = val else {
+        return (None, None);
+    };
+    let watch = v
+        .get("watchEndpoint")
+        .or_else(|| v.pointer("/navigationEndpoint/watchEndpoint"))
+        .or_else(|| v.pointer("/watchPlaylistEndpoint"));
+    let vid = watch
+        .and_then(|w| w.get("videoId"))
+        .and_then(|s| s.as_str())
+        .filter(|s| is_valid_video_id(s))
+        .map(|s| s.to_string());
+    let pid = watch
+        .and_then(|w| w.get("playlistId"))
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    (vid, pid)
+}
+
+fn extract_trailing_duration(subtitle: &str) -> String {
+    for token in subtitle.split('•').rev() {
+        let trimmed = token.trim();
+        if !trimmed.is_empty()
+            && trimmed.contains(':')
+            && trimmed.chars().all(|c| c.is_ascii_digit() || c == ':')
+        {
+            return trimmed.to_string();
+        }
+    }
+    String::new()
+}
+
+pub fn parse_music_responsive_item(r: &Value) -> Option<MusicTrackItem> {
+    let mut video_id = r
+        .pointer("/playlistItemData/videoId")
+        .and_then(|v| v.as_str())
+        .filter(|s| is_valid_video_id(s))
+        .map(|s| s.to_string());
+    let mut playlist_id: Option<String> = None;
+
+    if video_id.is_none() {
+        let (v, p) = extract_watch_endpoint(r.pointer(
+            "/overlay/musicItemThumbnailOverlayRenderer/content/musicPlayButtonRenderer/playNavigationEndpoint",
+        ));
+        if v.is_some() {
+            video_id = v;
+            playlist_id = p;
+        }
+    }
+
+    let mut title = String::new();
+    let mut subtitle_parts: Vec<String> = Vec::new();
+    let mut album: Option<String> = None;
+
+    if let Some(cols) = r.get("flexColumns").and_then(|v| v.as_array()) {
+        for (idx, col) in cols.iter().enumerate() {
+            let text_obj = col.pointer("/musicResponsiveListItemFlexColumnRenderer/text");
+            let val = extract_runs_or_simple(text_obj).trim().to_string();
+            if val.is_empty() {
+                continue;
+            }
+            if idx == 0 {
+                title = val;
+                if let Some(runs) = text_obj.and_then(|t| t.get("runs")).and_then(|a| a.as_array()) {
+                    if let Some(first_run) = runs.first() {
+                        let (v, p) = extract_watch_endpoint(first_run.get("navigationEndpoint"));
+                        if video_id.is_none() {
+                            video_id = v;
+                        }
+                        if playlist_id.is_none() {
+                            playlist_id = p;
+                        }
+                    }
+                }
+            } else {
+                if let Some(runs) = text_obj.and_then(|t| t.get("runs")).and_then(|a| a.as_array()) {
+                    for run in runs {
+                        let page_type = run
+                            .pointer("/navigationEndpoint/browseEndpoint/browseEndpointContextSupportedConfigs/browseEndpointContextMusicConfig/pageType")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if page_type.contains("ALBUM") && album.is_none() {
+                            if let Some(txt) = run.get("text").and_then(|v| v.as_str()) {
+                                album = Some(txt.trim().to_string());
+                            }
+                        }
+                    }
+                }
+                subtitle_parts.push(val);
+            }
+        }
+    }
+
+    if video_id.is_none() {
+        let (v, p) = extract_watch_endpoint(r.get("navigationEndpoint"));
+        video_id = v;
+        if playlist_id.is_none() {
+            playlist_id = p;
+        }
+    }
+
+    let vid = video_id?;
+    if title.is_empty() {
+        return None;
+    }
+
+    let mut duration_text = r
+        .pointer("/fixedColumns/0/musicResponsiveListItemFixedColumnRenderer/text")
+        .map(|t| extract_runs_or_simple(Some(t)))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    let combined_subtitle = subtitle_parts.join(" • ");
+    if duration_text.is_empty() {
+        duration_text = extract_trailing_duration(&combined_subtitle);
+    }
+    let duration_sec = parse_duration_to_sec(&duration_text);
+
+    let explicit = r
+        .get("badges")
+        .and_then(|b| b.as_array())
+        .map(|arr| {
+            arr.iter().any(|badge| {
+                badge.pointer("/musicInlineBadgeRenderer/icon/iconType").and_then(|v| v.as_str())
+                    == Some("MUSIC_EXPLICIT_BADGE")
+            })
+        })
+        .unwrap_or(false);
+
+    let thumbnail =
+        extract_thumb_or_fallback(extract_music_thumb(r), &vid);
+
+    let artist = if combined_subtitle.is_empty() {
+        "YouTube Music".to_string()
+    } else {
+        combined_subtitle
+    };
+
+    Some(MusicTrackItem {
+        id: vid,
+        title,
+        artist,
+        album,
+        duration_text,
+        duration_sec,
+        thumbnail,
+        playlist_id,
+        explicit,
+    })
+}
+
+fn extract_thumb_or_fallback(found: Option<String>, video_id: &str) -> String {
+    found.unwrap_or_else(|| format!("https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"))
+}
+
+fn parse_music_two_row_item(r: &Value) -> Option<MusicTrackItem> {
+    let (v1, p1) = extract_watch_endpoint(r.get("navigationEndpoint"));
+    let (v2, p2) = extract_watch_endpoint(
+        r.pointer("/thumbnailOverlay/musicItemThumbnailOverlayRenderer/content/musicPlayButtonRenderer/playNavigationEndpoint"),
+    );
+    let vid = v1.or(v2)?;
+    let playlist_id = p1.or(p2);
+    let title = extract_runs_or_simple(r.get("title")).trim().to_string();
+    if title.is_empty() {
+        return None;
+    }
+    let artist = extract_runs_or_simple(r.get("subtitle")).trim().to_string();
+    let duration_text = extract_trailing_duration(&artist);
+    let duration_sec = parse_duration_to_sec(&duration_text);
+    let thumbnail = extract_thumb_or_fallback(extract_music_thumb(r), &vid);
+
+    Some(MusicTrackItem {
+        id: vid,
+        title,
+        artist: if artist.is_empty() {
+            "YouTube Music".to_string()
+        } else {
+            artist
+        },
+        album: None,
+        duration_text,
+        duration_sec,
+        thumbnail,
+        playlist_id,
+        explicit: false,
+    })
+}
+
+fn parse_music_panel_renderer(
+    renderer: &Value,
+    override_video_id: Option<&str>,
+) -> Option<MusicTrackItem> {
+    let vid = override_video_id
+        .map(|s| s.to_string())
+        .or_else(|| {
+            renderer
+                .get("videoId")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })?;
+    if !is_valid_video_id(&vid) {
+        return None;
+    }
+    let title = extract_runs_or_simple(renderer.get("title"))
+        .trim()
+        .to_string();
+    if title.is_empty() {
+        return None;
+    }
+    let artist = extract_runs_or_simple(renderer.get("longBylineText"))
+        .trim()
+        .to_string();
+    let duration_text = extract_runs_or_simple(renderer.get("lengthText"))
+        .trim()
+        .to_string();
+    let duration_sec = parse_duration_to_sec(&duration_text);
+    let thumbnail = extract_thumb_or_fallback(
+        renderer
+            .pointer("/thumbnail/thumbnails")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.last())
+            .and_then(|t| t.get("url"))
+            .and_then(|s| s.as_str())
+            .map(|u| upgrade_music_thumb(u, 544)),
+        &vid,
+    );
+    let playlist_id = renderer
+        .pointer("/navigationEndpoint/watchEndpoint/playlistId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    Some(MusicTrackItem {
+        id: vid,
+        title,
+        artist: if artist.is_empty() {
+            "YouTube Music".to_string()
+        } else {
+            artist
+        },
+        album: None,
+        duration_text,
+        duration_sec,
+        thumbnail,
+        playlist_id,
+        explicit: false,
+    })
+}
+
+fn walk_music_tracks(val: &Value, tracks: &mut Vec<MusicTrackItem>, seen: &mut HashSet<String>) {
+    match val {
+        Value::Object(map) => {
+            if let Some(r) = map.get("musicResponsiveListItemRenderer") {
+                if let Some(item) = parse_music_responsive_item(r) {
+                    if seen.insert(item.id.clone()) {
+                        tracks.push(item);
+                    }
+                }
+                return;
+            }
+            if let Some(r) = map.get("musicTwoRowItemRenderer") {
+                if let Some(item) = parse_music_two_row_item(r) {
+                    if seen.insert(item.id.clone()) {
+                        tracks.push(item);
+                    }
+                }
+                return;
+            }
+            if let Some(card) = map.get("musicCardShelfRenderer") {
+                let (vid, playlist_id) = extract_watch_endpoint(card.get("onTap"));
+                if let Some(id) = vid {
+                    let title = extract_runs_or_simple(card.get("title")).trim().to_string();
+                    let artist = extract_runs_or_simple(card.get("subtitle")).trim().to_string();
+                    if !title.is_empty() && seen.insert(id.clone()) {
+                        let duration_text = extract_trailing_duration(&artist);
+                        let duration_sec = parse_duration_to_sec(&duration_text);
+                        tracks.push(MusicTrackItem {
+                            id: id.clone(),
+                            title,
+                            artist: if artist.is_empty() {
+                                "YouTube Music".to_string()
+                            } else {
+                                artist
+                            },
+                            album: None,
+                            duration_text,
+                            duration_sec,
+                            thumbnail: extract_thumb_or_fallback(extract_music_thumb(card), &id),
+                            playlist_id,
+                            explicit: false,
+                        });
+                    }
+                }
+                if let Some(contents) = card.get("contents") {
+                    walk_music_tracks(contents, tracks, seen);
+                }
+                return;
+            }
+            for (k, child) in map {
+                if !k.ends_with("HeaderRenderer") && k != "header" {
+                    walk_music_tracks(child, tracks, seen);
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for child in arr {
+                walk_music_tracks(child, tracks, seen);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn walk_music_shelves(val: &Value, shelves: &mut Vec<MusicShelf>) {
+    match val {
+        Value::Object(map) => {
+            for key in [
+                "musicCarouselShelfRenderer",
+                "musicImmersiveCarouselShelfRenderer",
+            ] {
+                if let Some(carousel) = map.get(key) {
+                    let hdr = carousel
+                        .pointer("/header/musicCarouselShelfBasicHeaderRenderer")
+                        .or_else(|| {
+                            carousel.pointer("/header/musicImmersiveCarouselShelfBasicHeaderRenderer")
+                        });
+                    let title = extract_runs_or_simple(hdr.and_then(|h| h.get("title")))
+                        .trim()
+                        .to_string();
+                    let mut items = Vec::new();
+                    let mut seen = HashSet::new();
+                    if let Some(contents) = carousel.get("contents") {
+                        walk_music_tracks(contents, &mut items, &mut seen);
+                    }
+                    if !items.is_empty() {
+                        shelves.push(MusicShelf {
+                            title: if title.is_empty() {
+                                "Đề xuất cho bạn".to_string()
+                            } else {
+                                title
+                            },
+                            items,
+                        });
+                    }
+                    return;
+                }
+            }
+
+            for key in ["musicShelfRenderer", "musicPlaylistShelfRenderer"] {
+                if let Some(shelf) = map.get(key) {
+                    let title = extract_runs_or_simple(shelf.get("title"))
+                        .trim()
+                        .to_string();
+                    let mut items = Vec::new();
+                    let mut seen = HashSet::new();
+                    if let Some(contents) = shelf.get("contents") {
+                        walk_music_tracks(contents, &mut items, &mut seen);
+                    }
+                    if !items.is_empty() {
+                        shelves.push(MusicShelf {
+                            title: if title.is_empty() {
+                                "Danh sách nhạc".to_string()
+                            } else {
+                                title
+                            },
+                            items,
+                        });
+                    }
+                    return;
+                }
+            }
+
+            for (k, child) in map {
+                if !k.ends_with("HeaderRenderer") && k != "header" {
+                    walk_music_shelves(child, shelves);
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for child in arr {
+                walk_music_shelves(child, shelves);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn walk_music_panel_tracks(
+    val: &Value,
+    tracks: &mut Vec<MusicTrackItem>,
+    seen: &mut HashSet<String>,
+) {
+    match val {
+        Value::Object(map) => {
+            if let Some(panel) = map.get("playlistPanelVideoRenderer") {
+                if let Some(item) = parse_music_panel_renderer(panel, None) {
+                    if seen.insert(item.id.clone()) {
+                        tracks.push(item);
+                    }
+                }
+                return;
+            }
+            if let Some(wrapper) = map.get("playlistPanelVideoWrapperRenderer") {
+                if let Some(primary) = wrapper.pointer("/primaryRenderer/playlistPanelVideoRenderer")
+                {
+                    if let Some(item) = parse_music_panel_renderer(primary, None) {
+                        if seen.insert(item.id.clone()) {
+                            tracks.push(item);
+                        }
+                    }
+                }
+                return;
+            }
+            for child in map.values() {
+                walk_music_panel_tracks(child, tracks, seen);
+            }
+        }
+        Value::Array(arr) => {
+            for child in arr {
+                walk_music_panel_tracks(child, tracks, seen);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upgrade_music_thumb_resizes_google_cover_art() {
+        let small = "https://lh3.googleusercontent.com/abc=w120-h120-l90-rj";
+        assert_eq!(
+            upgrade_music_thumb(small, 544),
+            "https://lh3.googleusercontent.com/abc=w544-h544-l90-rj"
+        );
+    }
+
+    #[test]
+    fn parse_reel_overlay_extracts_modern_viewmodel() {
+        let payload = json!({
+            "overlay": {
+                "reelPlayerOverlayRenderer": {
+                    "playerOverlay": {
+                        "reelPlayerOverlayViewModel": {
+                            "metapanel": {
+                                "reelMetapanelViewModel": {
+                                    "metadataItems": [
+                                        {
+                                            "reelChannelBarViewModel": {
+                                                "channelName": { "content": "@Vuimoi-ngay" },
+                                                "decoratedAvatarViewModel": {
+                                                    "decoratedAvatarViewModel": {
+                                                        "avatar": {
+                                                            "avatarViewModel": {
+                                                                "image": {
+                                                                    "sources": [{ "url": "https://yt3.ggpht.com/av.jpg" }]
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        {
+                                            "shortsVideoTitleViewModel": {
+                                                "text": { "content": "Video Shorts Mau" }
+                                            }
+                                        }
+                                    ]
+                                }
+                            },
+                            "actionBar": {
+                                "reelActionBarViewModel": {
+                                    "buttonViewModels": [
+                                        {
+                                            "likeButtonViewModel": {
+                                                "toggleButtonViewModel": {
+                                                    "toggleButtonViewModel": {
+                                                        "defaultButtonViewModel": {
+                                                            "buttonViewModel": { "title": "12 N" }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        {
+                                            "buttonViewModel": {
+                                                "iconName": "SHORTS_COMMENT",
+                                                "title": "621"
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let mut item = ShortVideoItem {
+            id: "dQw4w9WgXcQ".to_string(),
+            title: String::new(),
+            channel: String::new(),
+            channel_id: None,
+            channel_avatar: None,
+            thumbnail: String::new(),
+            like_count_text: None,
+            comment_count_text: None,
+            view_count_text: None,
+            published_text: None,
+            params: None,
+        };
+        parse_reel_overlay_metadata(&payload, &mut item);
+        assert_eq!(item.title, "Video Shorts Mau");
+        assert_eq!(item.channel, "@Vuimoi-ngay");
+        assert_eq!(item.like_count_text.as_deref(), Some("12 N"));
+        assert_eq!(item.comment_count_text.as_deref(), Some("621"));
+        assert_eq!(
+            item.channel_avatar.as_deref(),
+            Some("https://yt3.ggpht.com/av.jpg")
+        );
+    }
+
+    #[test]
+    fn parse_music_responsive_item_extracts_song_fields() {
+        let sample = json!({
+            "playlistItemData": { "videoId": "qHpE45b4INk" },
+            "thumbnail": {
+                "musicThumbnailRenderer": {
+                    "thumbnail": {
+                        "thumbnails": [
+                            { "url": "https://lh3.googleusercontent.com/cover=w60-h60-l90-rj" }
+                        ]
+                    }
+                }
+            },
+            "flexColumns": [
+                {
+                    "musicResponsiveListItemFlexColumnRenderer": {
+                        "text": { "runs": [{ "text": "Chung Ta Cua Tuong Lai" }] }
+                    }
+                },
+                {
+                    "musicResponsiveListItemFlexColumnRenderer": {
+                        "text": { "runs": [{ "text": "Son Tung M-TP" }] }
+                    }
+                }
+            ],
+            "fixedColumns": [
+                {
+                    "musicResponsiveListItemFixedColumnRenderer": {
+                        "text": { "runs": [{ "text": "4:09" }] }
+                    }
+                }
+            ],
+            "badges": [
+                { "musicInlineBadgeRenderer": { "icon": { "iconType": "MUSIC_EXPLICIT_BADGE" } } }
+            ]
+        });
+
+        let parsed = parse_music_responsive_item(&sample).expect("should parse music track");
+        assert_eq!(parsed.id, "qHpE45b4INk");
+        assert_eq!(parsed.title, "Chung Ta Cua Tuong Lai");
+        assert_eq!(parsed.artist, "Son Tung M-TP");
+        assert_eq!(parsed.duration_text, "4:09");
+        assert_eq!(parsed.duration_sec, 249);
+        assert!(parsed.explicit);
+        assert_eq!(
+            parsed.thumbnail,
+            "https://lh3.googleusercontent.com/cover=w544-h544-l90-rj"
+        );
+    }
+
+    #[test]
+    fn resolve_client_user_agent_matches_visionos_and_web_remix() {
+        let (vis_name, vis_ua) = resolve_client_user_agent(Some("VISIONOS"), Some("IOS"));
+        assert_eq!(vis_name, "VISIONOS");
+        assert_eq!(vis_ua, CLIENT_VISIONOS.user_agent);
+
+        let (remix_name, remix_ua) = resolve_client_user_agent(None, Some("WEB_REMIX"));
+        assert_eq!(remix_name, MUSIC_CLIENT_NAME);
+        assert_eq!(remix_ua, MUSIC_USER_AGENT);
+    }
+
+    #[test]
+    fn select_best_audio_prefers_140_then_251_by_bitrate() {
+        let make_fmt = |itag: i64, mime: &str, container: &str, codec: &str, bitrate: i64| AudioStreamFormat {
+            itag,
+            url: format!("https://rr1.googlevideo.com/videoplayback?itag={itag}"),
+            mime_type: mime.to_string(),
+            container: container.to_string(),
+            codec: codec.to_string(),
+            bitrate,
+            average_bitrate: Some(bitrate),
+            audio_sample_rate: Some("44100".to_string()),
+            audio_channels: Some(2),
+            content_length: Some(1_000_000),
+            approx_duration_ms: Some(180_000),
+            init_range: None,
+            index_range: None,
+            is_original: Some(true),
+            language: None,
+        };
+
+        let f250 = make_fmt(250, "audio/webm; codecs=\"opus\"", "webm", "opus", 80_000);
+        let f251 = make_fmt(251, "audio/webm; codecs=\"opus\"", "webm", "opus", 160_000);
+        let f140 = make_fmt(140, "audio/mp4; codecs=\"mp4a.40.2\"", "m4a", "mp4a.40.2", 130_000);
+
+        let chosen_with_140 = select_best_audio(&[f250.clone(), f251.clone(), f140.clone()]).unwrap();
+        assert_eq!(chosen_with_140.itag, 140);
+
+        let chosen_without_140 = select_best_audio(&[f250, f251]).unwrap();
+        assert_eq!(chosen_without_140.itag, 251);
+    }
+
+    #[test]
+    fn is_playable_rejects_sabr_only_formats_without_urls() {
+        let sabr_only = json!({
+            "playabilityStatus": { "status": "OK" },
+            "streamingData": {
+                "adaptiveFormats": [
+                    { "itag": 140, "mimeType": "audio/mp4" },
+                    { "itag": 137, "mimeType": "video/mp4" }
+                ]
+            }
+        });
+        assert!(!YouTubeService::is_playable(&sabr_only));
+
+        let playable = json!({
+            "playabilityStatus": { "status": "OK" },
+            "streamingData": {
+                "adaptiveFormats": [
+                    { "itag": 140, "mimeType": "audio/mp4", "url": "https://rr1.googlevideo.com/videoplayback?itag=140" }
+                ]
+            }
+        });
+        assert!(YouTubeService::is_playable(&playable));
+    }
 }

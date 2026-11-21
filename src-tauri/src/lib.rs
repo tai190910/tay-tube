@@ -13,7 +13,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::{Manager, State, WebviewWindow};
 use url::Url;
-use youtube::{CommentsResult, SearchVideoItem, TayTubeVideoDetails, YouTubeService};
+use youtube::{
+    CommentsResult, MusicAudioStreamResult, MusicShelf, MusicTrackItem, SearchVideoItem,
+    ShortsFeedResult, TayTubeVideoDetails, YouTubeService,
+};
 
 pub struct AppState {
     pub db: Arc<AppDatabase>,
@@ -282,6 +285,61 @@ async fn sync_watch_progress(
         .await
 }
 
+#[tauri::command]
+async fn get_shorts_feed(
+    state: State<'_, AppState>,
+    continuation: Option<String>,
+) -> Result<ShortsFeedResult, String> {
+    state.yt.get_shorts_feed(continuation).await
+}
+
+#[tauri::command]
+async fn rate_video(
+    state: State<'_, AppState>,
+    video_id: String,
+    like: bool,
+) -> Result<bool, String> {
+    state.yt.rate_video(&video_id, like).await
+}
+
+#[tauri::command]
+async fn get_music_home(state: State<'_, AppState>) -> Result<Vec<MusicShelf>, String> {
+    state.yt.get_music_home().await
+}
+
+#[tauri::command]
+async fn search_music(
+    state: State<'_, AppState>,
+    query: String,
+    filter: Option<String>,
+) -> Result<Vec<MusicTrackItem>, String> {
+    state.yt.search_music(&query, filter.as_deref()).await
+}
+
+#[tauri::command]
+async fn get_music_radio(
+    state: State<'_, AppState>,
+    video_id: String,
+    playlist_id: Option<String>,
+) -> Result<Vec<MusicTrackItem>, String> {
+    state
+        .yt
+        .get_music_radio(&video_id, playlist_id.as_deref())
+        .await
+}
+
+#[tauri::command]
+async fn get_music_audio_stream(
+    state: State<'_, AppState>,
+    video_id: String,
+    playlist_id: Option<String>,
+) -> Result<MusicAudioStreamResult, String> {
+    state
+        .yt
+        .get_music_audio_stream(&video_id, playlist_id.as_deref())
+        .await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -328,6 +386,12 @@ pub fn run() {
             add_to_watch_later,
             remove_from_watch_later,
             sync_watch_progress,
+            get_shorts_feed,
+            rate_video,
+            get_music_home,
+            search_music,
+            get_music_radio,
+            get_music_audio_stream,
             auth_get_account,
             auth_start_device,
             auth_poll_device,

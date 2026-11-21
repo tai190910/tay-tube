@@ -1,50 +1,75 @@
-# Tày Tube PC
+# Tày Tube PC 🎬
 
-Ứng dụng xem YouTube trên Windows được xây dựng bằng **Tauri v2 (Rust backend)** và **React + TypeScript + Vite + TailwindCSS**, tối ưu bộ nhớ và CPU cho máy cấu hình tầm trung hoặc thấp (ví dụ Intel Core i5-4590S và NVIDIA GT 730).
+**Trình phát video & xem phim Desktop hiện đại, tối giản và siêu mượt dành cho Windows.**  
+*A modern, lightweight, and high-performance desktop video player built for Windows.*
 
-## Tính năng chính
+---
 
-### Phát mượt và tua nhanh video siêu dài (9 đến 37 giờ)
-- Backend Rust tích hợp **Chunked Range Proxy** nội bộ trên `http://127.0.0.1:8989` (`axum` + `reqwest` + `tokio`, giữ kết nối keep-alive và truyền trực tiếp theo từng chunk tối đa 2 MB).
-- Tự động lấy luồng HLS (`hlsManifestUrl`) qua InnerTube client `IOS` và ghi lại playlist qua `/hls-manifest` để phát bằng **Shaka Player** trên một thẻ `<video>` duy nhất, kèm fallback sang MP4 qua `/stream` và tự làm mới URL nếu gặp HTTP 403.
+## 📥 Tải về & Cài đặt nhanh (Dành cho người dùng Windows)
 
-### Giao diện Cinema Dark Mode tối giản
-- Tự động ẩn thanh điều khiển và con trỏ chuột sau 2,5 giây không di chuyển chuột khi đang phát, dùng chuyển động `opacity` và `translateY`.
-- Thanh tiến trình có hiển thị phần đã đệm (`buffered`), kéo tua và tooltip thời gian định dạng `HH:MM:SS` cho video dài.
-- Hạn chế các lớp `backdrop-blur` nặng GPU, giữ nền tối `#0b0b0b` cho tốc độ khung hình ổn định.
-- Hỗ trợ phím tắt chuẩn YouTube: `Space` / `K` (phát hoặc dừng), `J` / `L` (tua 10 giây), `←` / `→` (tua 5 giây), `↑` / `↓` (âm lượng), `M` (tắt tiếng), `F` (toàn màn hình), `T` (rạp hát).
+Tải ngay phiên bản phát hành mới nhất của **Tày Tube PC** tại đường dẫn sau:  
+👉 **[Trang Releases - Tày Tube PC](https://github.com/tai190910/tay-tube/releases)**
 
-### Phụ đề không khóa UI, SponsorBlock và SQLite cục bộ
-- Phân tích phụ đề VTT theo batch bất đồng bộ, lưu danh sách cue vào `useRef` và tìm kiếm nhị phân theo thời gian phát.
-- Tự động bỏ qua đoạn tài trợ, intro hoặc outro từ dữ liệu SponsorBlock.
-- Lưu lịch sử xem, vị trí xem dở (tự bỏ qua 10 giây đầu và cuối) và danh sách yêu thích bằng SQLite tích hợp (`rusqlite` `bundled`) tại `%APPDATA%\tay-tube-pc\taytube.db`.
+Tại trang Releases, bạn có thể lựa chọn 1 trong 2 phiên bản phù hợp với nhu cầu:
 
-## Yêu cầu môi trường
+| Tệp cài đặt (`.exe`) | Phiên bản | Mô tả & Cách sử dụng |
+| :--- | :--- | :--- |
+| **`Tay-Tube-PC-Setup-1.0.0.exe`** | **Bản cài đặt đầy đủ** *(Khuyên dùng)* | Tự động cài đặt vào hệ thống Windows, tự tạo biểu tượng shortcut ngoài màn hình Desktop và trong Start Menu để tiện mở ứng dụng hàng ngày. |
+| **`Tay-Tube-PC-1.0.0-Portable.exe`** | **Bản Portable** *(Chạy ngay)* | Không cần cài đặt. Tải về nhấp đúp chuột là xem phim được ngay, có thể copy vào USB để mang theo và sử dụng trên nhiều máy tính khác nhau. |
 
-- Node.js >= 18 và npm
-- Rust và Cargo (`rustup` toolchain `stable-x86_64-pc-windows-msvc`)
-- Microsoft Edge WebView2 Runtime (có sẵn trên Windows 10/11)
+> [!NOTE]
+> ### 🛡️ Lưu ý về cảnh báo bảo vệ của Windows (SmartScreen)
+> Do **Tày Tube PC** là dự án mã nguồn mở phát triển độc lập phi lợi nhuận (chưa đăng ký chứng chỉ số thương mại đắt tiền từ Microsoft), khi bạn mở file `.exe` lần đầu tiên, Windows SmartScreen có thể hiển thị cảnh báo:  
+> **`"Windows protected your PC"`** *(Windows đã bảo vệ máy tính của bạn)*.
+>
+> **Cách xử lý rất đơn giản:**
+> 1. Nhấp chuột vào dòng chữ **"More info"** *(Thêm thông tin)* trên bảng cảnh báo.
+> 2. Chọn nút **"Run anyway"** *(Vẫn chạy)*. Ứng dụng sẽ khởi động bình thường và hoàn toàn an toàn cho thiết bị của bạn.
 
-## Cài đặt và phát triển
+---
 
-```bash
-npm install
-npm run tauri:dev
-```
+## 🌟 Giới thiệu & Tính năng chính
 
-Chạy kiểm tra mã nguồn frontend và unit test backend Rust:
+**Tày Tube PC** là ứng dụng xem video/phim YouTube trên desktop dành riêng cho Windows, tập trung vào khả năng phát ổn định các video siêu dài, giao diện rạp chiếu phim tối giản và tiêu tốn cực ít tài nguyên phần cứng:
 
-```bash
-npm run build
-cd src-tauri && cargo test
-```
+- 🎞️ **Phát & Tua video siêu dài tức thì (Instant Seeking):** Tích hợp cơ chế **Chunked Range Proxy** chia nhỏ dữ liệu truyền tải theo từng phân đoạn thông minh, giúp tua (scrubbing) mượt mà ngay cả trên các video dài hàng chục tiếng đồng hồ (19h+) mà không gây tràn RAM hay đứng hình.
+- 🎥 **Giao diện Cinema Dark Mode thông minh:** Tự động ẩn thanh điều khiển và con trỏ chuột sau vài giây không thao tác để tối ưu không gian hiển thị, không làm ảnh hưởng đến trải nghiệm xem phim.
+- ⚡ **Tối ưu phần cứng tầm trung & văn phòng:** Giảm thiểu tối đa các hiệu ứng làm mờ (blur) ngốn GPU, đảm bảo hoạt động mát mẻ, ổn định trên các cấu hình phổ thông.
+- 💾 **Lưu trữ cục bộ an toàn (Offline):** Toàn bộ lịch sử xem phim, kênh/video yêu thích được lưu trữ cục bộ ngay trên máy thông qua SQLite, không cần đăng nhập tài khoản.
 
-## Đóng gói bản build Windows (x64)
+---
 
-```bash
-npm run build:release
-```
+## 💻 Dành cho lập trình viên (Build từ mã nguồn)
 
-Lệnh này biên dịch giao diện vào `dist-renderer/`, biên dịch Tauri v2 + Rust bản release (đã nhúng WebView assets, icon và SQLite) rồi xuất cả 2 tệp vào thư mục `release/`:
-- `release/Tay-Tube-PC_1.0.0_x64-setup.exe` (bộ cài đặt NSIS trên Windows)
-- `release/Tay-Tube-PC_1.0.0_x64-portable.exe` (bản chạy trực tiếp không cần cài đặt)
+Dành cho những ai muốn tự đóng gói từ mã nguồn hoặc tham gia phát triển dự án:
+
+### Yêu cầu môi trường
+- **Hệ điều hành:** Windows 10 / 11 (64-bit)
+- **Node.js:** Phiên bản 20 trở lên và `npm`
+- *(Nếu build bản Rust / Tauri v2)*: **Rust** (`rustc` + `cargo`), **Microsoft C++ Build Tools** và **Microsoft Edge WebView2 Runtime**
+
+### Các bước cài đặt và khởi chạy
+
+1. **Clone mã nguồn về máy:**
+   ```bash
+   git clone https://github.com/tai190910/tay-tube.git
+   cd tay-tube
+   ```
+
+2. **Cài đặt các thư viện phụ thuộc:**
+   ```bash
+   npm install
+   ```
+
+3. **Khởi chạy ở chế độ phát triển (Live Dev):**
+   ```bash
+   npm run tauri:dev
+   ```
+
+4. **Đóng gói bản build hoàn chỉnh cho Windows (x64):**
+   ```bash
+   npm run build:release
+   ```
+   Lệnh này biên dịch giao diện, build ứng dụng **Tauri v2 + Rust** ở chế độ release và tự động xuất cả 2 tệp vào thư mục `release/`:
+   - `release/Tay-Tube-PC-Setup-1.0.0.exe` (bộ cài đặt NSIS)
+   - `release/Tay-Tube-PC-1.0.0-Portable.exe` (bản chạy ngay không cần cài đặt)

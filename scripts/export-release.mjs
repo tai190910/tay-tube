@@ -13,10 +13,10 @@ const targetReleaseDir = path.join(rootDir, 'src-tauri', 'target', 'release');
 const nsisBundleDir = path.join(targetReleaseDir, 'bundle', 'nsis');
 
 const portableSrc = path.join(targetReleaseDir, 'tay-tube-pc.exe');
-const portableDestName = `Tay-Tube-PC_${version}_x64-portable.exe`;
+const portableDestName = `Tay-Tube-PC-${version}-Portable.exe`;
 const portableDest = path.join(releaseDir, portableDestName);
 
-const setupDestName = `Tay-Tube-PC_${version}_x64-setup.exe`;
+const setupDestName = `Tay-Tube-PC-Setup-${version}.exe`;
 const setupDest = path.join(releaseDir, setupDestName);
 
 const MIN_VALID_BYTES = 1024 * 1024; // 1 MB

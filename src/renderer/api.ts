@@ -9,11 +9,48 @@ import {
   MusicAudioStreamResult,
   MusicShelf,
   MusicTrackItem,
+  RelatedVideosResult,
   ResumeItemUI,
   ShortsFeedResult,
   TayTubeVideoDetails,
   VideoItemUI,
 } from './types.js';
+
+let cachedProxyPort = 8989;
+let proxyPortPromise: Promise<number> | null = null;
+
+export function getCachedProxyPort(): number {
+  return cachedProxyPort;
+}
+
+export function getProxyBaseUrl(portOverride?: number): string {
+  return `http://127.0.0.1:${portOverride ?? cachedProxyPort}`;
+}
+
+export function extractProxyPortFromUrl(url?: string | null): number | null {
+  if (!url) return null;
+  const match = url.match(/^https?:\/\/127\.0\.0\.1:(\d+)\//i);
+  if (!match) return null;
+  const parsed = parseInt(match[1], 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+export async function initProxyPort(): Promise<number> {
+  if (!proxyPortPromise) {
+    proxyPortPromise = invoke<number>('get_proxy_port')
+      .then((port) => {
+        if (typeof port === 'number' && port > 0) {
+          cachedProxyPort = port;
+        }
+        return cachedProxyPort;
+      })
+      .catch(() => {
+        proxyPortPromise = null;
+        return cachedProxyPort;
+      });
+  }
+  return proxyPortPromise;
+}
 
 export const desktopAPI = {
   // Auth (Google Device OAuth2 + Token Refresh)
@@ -74,6 +111,12 @@ export const desktopAPI = {
 
   getVideoComments: (videoId: string): Promise<CommentsResult> =>
     invoke<CommentsResult>('get_video_comments', { videoId }),
+
+  getRelatedVideosContinuation: (
+    videoId: string,
+    continuation: string
+  ): Promise<RelatedVideosResult> =>
+    invoke<RelatedVideosResult>('get_related_videos_continuation', { videoId, continuation }),
 
   // YouTube Shorts APIs
   getShortsFeed: (continuation?: string | null): Promise<ShortsFeedResult> =>
@@ -143,10 +186,14 @@ export const desktopAPI = {
     durationSec: number;
   }): Promise<boolean> => invoke<boolean>('db_toggle_favorite', { item }),
 
-  // Native Window Controls
+  // Native Window Controls & Runtime Info
+  getProxyPort: (): Promise<number> => invoke<number>('get_proxy_port'),
   minimizeWindow: (): Promise<void> => invoke<void>('window_minimize'),
   maximizeWindow: (): Promise<void> => invoke<void>('window_toggle_maximize'),
   closeWindow: (): Promise<void> => invoke<void>('window_close'),
   toggleFullscreen: (): Promise<boolean> => invoke<boolean>('window_toggle_fullscreen'),
   isFullscreen: (): Promise<boolean> => invoke<boolean>('window_is_fullscreen'),
+  enterPipMode: (): Promise<boolean> => invoke<boolean>('window_enter_pip'),
+  exitPipMode: (): Promise<boolean> => invoke<boolean>('window_exit_pip'),
+  startWindowDragging: (): Promise<void> => invoke<void>('window_start_dragging'),
 };

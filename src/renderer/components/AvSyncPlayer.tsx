@@ -11,11 +11,29 @@ import {
   Settings,
   Maximize,
   Minimize,
+  Maximize2,
+  PictureInPicture2,
+  ListVideo,
   Tv,
   Check,
+  X,
 } from 'lucide-react';
+import {
+  desktopAPI,
+  initProxyPort,
+  getCachedProxyPort,
+  getProxyBaseUrl,
+  extractProxyPortFromUrl,
+} from '../api.js';
 import { SubtitleParser, SubtitleCue } from '../../core/subtitles/subtitle-parser.js';
 import { CaptionTrackInfo, TayTubeVideoDetails } from '../types.js';
+import { VideoChapter, findActiveChapter } from '../utils/descriptionParser.js';
+
+const EMPTY_CHAPTERS: VideoChapter[] = [];
+
+export interface PlayerSeekController {
+  seekAndPlay: (targetSec: number) => void;
+}
 
 interface AvSyncPlayerProps {
   details: TayTubeVideoDetails;
@@ -24,6 +42,12 @@ interface AvSyncPlayerProps {
   isTheater: boolean;
   onToggleTheater: () => void;
   onRegisterCleanup?: (cleanupFn: () => void) => void;
+  isPipMode?: boolean;
+  onTogglePip?: () => void;
+  onExitPip?: () => void;
+  onClosePip?: () => void;
+  chapters?: VideoChapter[];
+  onRegisterSeekController?: (controller: PlayerSeekController | null) => void;
 }
 
 type StreamMode = 'hls' | 'muxed';
@@ -85,6 +109,12 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
   isTheater,
   onToggleTheater,
   onRegisterCleanup,
+  isPipMode = false,
+  onTogglePip,
+  onExitPip,
+  onClosePip,
+  chapters = EMPTY_CHAPTERS,
+  onRegisterSeekController,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const shakaPlayerRef = useRef<any | null>(null);
@@ -124,8 +154,18 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
   onToggleTheaterRef.current = onToggleTheater;
   const onTimeUpdateRef = useRef(onTimeUpdate);
   onTimeUpdateRef.current = onTimeUpdate;
+  const isPipModeRef = useRef<boolean>(isPipMode);
+  isPipModeRef.current = isPipMode;
+  const onTogglePipRef = useRef(onTogglePip);
+  onTogglePipRef.current = onTogglePip;
+  const onExitPipRef = useRef(onExitPip);
+  onExitPipRef.current = onExitPip;
+  const onClosePipRef = useRef(onClosePip);
+  onClosePipRef.current = onClosePip;
+  const suppressNextVideoClickRef = useRef<boolean>(false);
+  const suppressResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Auto-hide Controls & Cursor Refs (2.5s idle timeout)
+  // Auto-hide Controls & Cursor Refs (2s idle in PiP, 2.5s idle in normal mode)
   const [showControls, setShowControls] = useState<boolean>(true);
   const controlsTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isHoveringControlsRef = useRef<boolean>(false);
@@ -138,10 +178,13 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
   const [showQualityMenu, setShowQualityMenu] = useState<boolean>(false);
   const [showSpeedMenu, setShowSpeedMenu] = useState<boolean>(false);
   const [showCcMenu, setShowCcMenu] = useState<boolean>(false);
+  const [showChaptersMenu, setShowChaptersMenu] = useState<boolean>(false);
+  const chaptersRef = useRef<VideoChapter[]>(chapters);
+  chaptersRef.current = chapters;
 
-  isMenuOpenRef.current = showQualityMenu || showSpeedMenu || showCcMenu;
+  isMenuOpenRef.current = showQualityMenu || showSpeedMenu || showCcMenu || showChaptersMenu;
 
-  // Schedule auto-hiding controls & cursor after 2.5s of mouse inactivity
+  // Keep empty dependency array so Shaka/Video stream init effect never re-runs on PiP toggle
   const scheduleHideControls = useCallback(() => {
     setShowControls(true);
     if (controlsTimeoutRef.current) {
@@ -149,6 +192,7 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
       controlsTimeoutRef.current = null;
     }
 
+    const timeoutMs = isPipModeRef.current ? 2000 : 2500;
     controlsTimeoutRef.current = setTimeout(() => {
       const video = videoRef.current;
       if (
@@ -160,17 +204,64 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
       ) {
         setShowControls(false);
       }
-    }, 2500);
+    }, timeoutMs);
   }, []);
+
+  useEffect(() => {
+    if (isPipMode) {
+      setShowQualityMenu(false);
+      setShowSpeedMenu(false);
+      setShowCcMenu(false);
+      setShowChaptersMenu(false);
+    }
+    scheduleHideControls();
+  }, [isPipMode, scheduleHideControls]);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement));
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      if (suppressResetTimeoutRef.current) {
+        clearTimeout(suppressResetTimeoutRef.current);
+        suppressResetTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  const [proxyPort, setProxyPort] = useState<number>(
+    () =>
+      extractProxyPortFromUrl(
+        details.proxyHlsUrl || details.proxyVideoUrl || details.proxyAudioUrl
+      ) ?? getCachedProxyPort()
+  );
+
+  useEffect(() => {
+    const fromDetails = extractProxyPortFromUrl(
+      details.proxyHlsUrl || details.proxyVideoUrl || details.proxyAudioUrl
+    );
+    if (fromDetails) {
+      setProxyPort(fromDetails);
+    }
+    initProxyPort()
+      .then((port) => {
+        if (!fromDetails && port > 0) {
+          setProxyPort(port);
+        }
+      })
+      .catch(() => {});
+  }, [details.id, details.proxyHlsUrl, details.proxyVideoUrl, details.proxyAudioUrl]);
 
   // Resolve Official HLS URL (from YouTube VISIONOS / iOS client via .m3u8 proxy)
   const hlsUrl = useMemo(() => {
     if (details.proxyHlsUrl) return details.proxyHlsUrl;
     if (details.hlsManifestUrl) {
-      return `http://127.0.0.1:8989/hls.m3u8?url=${encodeURIComponent(details.hlsManifestUrl)}&id=${encodeURIComponent(details.id)}`;
+      return `${getProxyBaseUrl(proxyPort)}/hls.m3u8?url=${encodeURIComponent(details.hlsManifestUrl)}&id=${encodeURIComponent(details.id)}`;
     }
     return '';
-  }, [details.id, details.proxyHlsUrl, details.hlsManifestUrl]);
+  }, [details.id, details.proxyHlsUrl, details.hlsManifestUrl, proxyPort]);
 
   // Resolve Direct Muxed MP4 fallback streams: prefer itag 22 (720p) then itag 18 (360p)
   const muxedStreams = useMemo(() => {
@@ -185,9 +276,9 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
     (rawUrl?: string, itag?: number) => {
       if (!rawUrl) return '';
       const itagParam = itag ? `&itag=${itag}` : '';
-      return `http://127.0.0.1:8989/stream?url=${encodeURIComponent(rawUrl)}&id=${encodeURIComponent(details.id)}${itagParam}`;
+      return `${getProxyBaseUrl(proxyPort)}/stream?url=${encodeURIComponent(rawUrl)}&id=${encodeURIComponent(details.id)}${itagParam}`;
     },
-    [details.id]
+    [details.id, proxyPort]
   );
 
   const muxedFallbackSrc = useMemo(
@@ -629,6 +720,33 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
     [details.durationSec, scheduleHideControls]
   );
 
+  const seekAndPlay = useCallback(
+    (targetSec: number) => {
+      seek(targetSec);
+      const video = videoRef.current;
+      if (video && video.paused) {
+        video
+          .play()
+          .then(() => {
+            setIsPlaying(true);
+            scheduleHideControls();
+          })
+          .catch(() => {});
+      }
+      const matchedChapter = findActiveChapter(chaptersRef.current, targetSec);
+      const label = formatTime(targetSec, (durationRef.current || details.durationSec || 0) >= 3600);
+      showToast(matchedChapter ? `${label} • ${matchedChapter.title}` : `Tua tới ${label}`);
+    },
+    [details.durationSec, seek, scheduleHideControls, showToast]
+  );
+
+  useEffect(() => {
+    onRegisterSeekController?.({ seekAndPlay });
+    return () => {
+      onRegisterSeekController?.(null);
+    };
+  }, [onRegisterSeekController, seekAndPlay]);
+
   // Interactive Seekbar Ratio Calculator & Drag Scrubbing
   const computeSeekRatioFromClientX = useCallback((clientX: number): number => {
     const bar = seekbarRef.current;
@@ -740,6 +858,83 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
       setIsFullscreen(false);
     }
   }, []);
+
+  const handleTogglePipClick = useCallback(() => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+      setIsFullscreen(false);
+    }
+    onTogglePipRef.current?.();
+  }, []);
+
+  const handleContainerMouseDown = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      scheduleHideControls();
+      if (!isPipModeRef.current || e.button !== 0) return;
+
+      const targetEl = e.target as HTMLElement | null;
+      if (targetEl?.closest('button, input, a, [data-pip-no-drag]')) {
+        return;
+      }
+
+      const startX = e.clientX;
+      const startY = e.clientY;
+      let dragStarted = false;
+
+      const cleanup = () => {
+        window.removeEventListener('mousemove', onMouseMove);
+        window.removeEventListener('mouseup', onMouseUp);
+      };
+
+      const onMouseMove = (moveEvt: MouseEvent) => {
+        if (dragStarted) return;
+        if (Math.hypot(moveEvt.clientX - startX, moveEvt.clientY - startY) >= 4) {
+          dragStarted = true;
+          cleanup();
+          suppressNextVideoClickRef.current = true;
+          if (suppressResetTimeoutRef.current) {
+            clearTimeout(suppressResetTimeoutRef.current);
+          }
+          suppressResetTimeoutRef.current = setTimeout(() => {
+            suppressNextVideoClickRef.current = false;
+          }, 350);
+          desktopAPI.startWindowDragging().catch(() => {});
+        }
+      };
+
+      const onMouseUp = () => {
+        cleanup();
+      };
+
+      window.addEventListener('mousemove', onMouseMove);
+      window.addEventListener('mouseup', onMouseUp);
+    },
+    [scheduleHideControls]
+  );
+
+  const handleContainerMouseLeave = useCallback(() => {
+    isHoveringControlsRef.current = false;
+    if (
+      isPipModeRef.current &&
+      videoRef.current &&
+      !videoRef.current.paused &&
+      !isScrubbingRef.current
+    ) {
+      if (controlsTimeoutRef.current) {
+        clearTimeout(controlsTimeoutRef.current);
+        controlsTimeoutRef.current = null;
+      }
+      setShowControls(false);
+    }
+  }, []);
+
+  const handleVideoClick = useCallback(() => {
+    if (suppressNextVideoClickRef.current) {
+      suppressNextVideoClickRef.current = false;
+      return;
+    }
+    togglePlay();
+  }, [togglePlay]);
 
   // Update buffered progress bar from video.buffered TimeRanges
   const updateBufferedRange = useCallback(() => {
@@ -854,12 +1049,29 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
         case 'f':
         case 'F':
           e.preventDefault();
-          toggleFullscreen();
+          if (isPipModeRef.current) {
+            onExitPipRef.current?.();
+          } else {
+            toggleFullscreen();
+          }
+          break;
+        case 'p':
+        case 'P':
+          e.preventDefault();
+          handleTogglePipClick();
           break;
         case 't':
         case 'T':
-          e.preventDefault();
-          onToggleTheaterRef.current();
+          if (!isPipModeRef.current) {
+            e.preventDefault();
+            onToggleTheaterRef.current();
+          }
+          break;
+        case 'Escape':
+          if (isPipModeRef.current) {
+            e.preventDefault();
+            onExitPipRef.current?.();
+          }
           break;
         case 'ArrowUp':
           e.preventDefault();
@@ -874,7 +1086,15 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [togglePlay, seek, toggleMute, toggleFullscreen, handleVolumeChange, showToast]);
+  }, [
+    togglePlay,
+    seek,
+    toggleMute,
+    toggleFullscreen,
+    handleTogglePipClick,
+    handleVolumeChange,
+    showToast,
+  ]);
 
   // Quality options shown in menu: HLS heights if loaded, else available muxed/all qualities
   const availableQualities = useMemo(() => {
@@ -896,18 +1116,41 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
   const safeDuration = duration > 0 ? duration : 1;
   const playedPercent = Math.min(100, Math.max(0, (effectiveTime / safeDuration) * 100));
   const bufferedPercent = Math.min(100, Math.max(0, (bufferedEndSec / safeDuration) * 100));
-  const isControlsVisible = showControls || !isPlaying || isScrubbing || showQualityMenu || showSpeedMenu || showCcMenu;
+  const isControlsVisible =
+    showControls ||
+    !isPlaying ||
+    isScrubbing ||
+    showQualityMenu ||
+    showSpeedMenu ||
+    showCcMenu ||
+    showChaptersMenu;
   const isMultiHourVideo = duration >= 3600;
+  const activeChapter = useMemo(
+    () => findActiveChapter(chapters, effectiveTime),
+    [chapters, effectiveTime]
+  );
+  const hoveredChapter = useMemo(
+    () =>
+      hoverRatio !== null && duration > 0
+        ? findActiveChapter(chapters, hoverRatio * duration)
+        : null,
+    [chapters, hoverRatio, duration]
+  );
 
   return (
     <div
       ref={containerRef}
       onMouseMove={scheduleHideControls}
-      onMouseDown={scheduleHideControls}
+      onMouseDown={handleContainerMouseDown}
+      onMouseLeave={handleContainerMouseLeave}
       style={{ cursor: !isControlsVisible && isPlaying ? 'none' : 'default' }}
-      className={`relative w-full bg-black select-none group overflow-hidden border border-white/[0.06] shadow-2xl ${
-        isTheater ? 'h-[76vh] rounded-[12px]' : 'aspect-video rounded-[12px]'
-      } flex items-center justify-center`}
+      className={`relative bg-black select-none group overflow-hidden flex items-center justify-center ${
+        isPipMode
+          ? 'w-screen h-screen rounded-none border border-white/15'
+          : `w-full border border-white/[0.06] shadow-2xl ${
+              isTheater ? 'h-[76vh] rounded-[12px]' : 'aspect-video rounded-[12px]'
+            }`
+      }`}
     >
       {/* DUY NHẤT 1 THẺ <video> - Không dùng thẻ <audio> ẩn hay Virtual DASH */}
       <video
@@ -953,7 +1196,7 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
             setDuration(d);
           }
         }}
-        onClick={togglePlay}
+        onClick={handleVideoClick}
         className="w-full h-full object-contain"
       />
 
@@ -966,7 +1209,10 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
 
       {/* Playback Error & Retry Overlay */}
       {playbackError && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 z-30 px-6 text-center space-y-3">
+        <div
+          data-pip-no-drag="true"
+          className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 z-30 px-6 text-center space-y-3"
+        >
           <p className="text-sm font-semibold text-white max-w-md">{playbackError}</p>
           <div className="flex items-center space-x-2.5">
             <button
@@ -991,7 +1237,11 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
 
       {/* Toast Notification (Pure rgba background, zero GPU backdrop-blur) */}
       {toastMessage && (
-        <div className="absolute top-14 left-5 z-30 bg-[#141414]/95 text-white px-3.5 py-2 rounded-[8px] shadow-xl border border-white/10 flex items-center space-x-2 text-xs font-medium pointer-events-none">
+        <div
+          className={`absolute z-30 bg-[#141414]/95 text-white rounded-[8px] shadow-xl border border-white/10 flex items-center space-x-2 font-medium pointer-events-none ${
+            isPipMode ? 'top-10 left-3 px-2.5 py-1 text-[11px]' : 'top-14 left-5 px-3.5 py-2 text-xs'
+          }`}
+        >
           <span className="w-2 h-2 rounded-full bg-emerald-500" />
           <span>{toastMessage}</span>
         </div>
@@ -1000,47 +1250,98 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
       {/* Subtitles Overlay (Automatically shifts down smoothly when controls auto-hide) */}
       {isCcEnabled && currentCueText && (
         <div
-          className={`absolute left-0 right-0 flex justify-center pointer-events-none z-20 px-8 transition-[bottom] duration-300 ease-out ${
-            isControlsVisible ? 'bottom-20' : 'bottom-6'
+          className={`absolute left-0 right-0 flex justify-center pointer-events-none z-20 transition-[bottom] duration-300 ease-out ${
+            isPipMode
+              ? isControlsVisible
+                ? 'bottom-14 px-3'
+                : 'bottom-3 px-3'
+              : isControlsVisible
+                ? 'bottom-20 px-8'
+                : 'bottom-6 px-8'
           }`}
         >
-          <span className="bg-black/85 text-white text-base md:text-lg px-3.5 py-1.5 rounded-[8px] font-medium text-center shadow-lg whitespace-pre-wrap leading-snug border border-white/5">
+          <span
+            className={`bg-black/85 text-white rounded-[8px] font-medium text-center shadow-lg whitespace-pre-wrap leading-snug border border-white/5 ${
+              isPipMode ? 'text-xs px-2.5 py-1' : 'text-base md:text-lg px-3.5 py-1.5'
+            }`}
+          >
             {currentCueText}
           </span>
         </div>
       )}
 
-      {/* Top Title Bar Overlay (Smooth opacity + translateY transition) */}
-      <div
-        style={{
-          background: 'linear-gradient(to bottom, rgba(0,0,0,0.78) 0%, rgba(0,0,0,0) 100%)',
-        }}
-        className={`absolute top-0 left-0 right-0 px-5 pt-3.5 pb-6 flex items-center justify-between text-white text-sm font-semibold z-20 transition-[opacity,transform] duration-300 ease-out ${
-          isControlsVisible
-            ? 'opacity-100 translate-y-0'
-            : 'opacity-0 -translate-y-3 pointer-events-none'
-        }`}
-      >
-        <span className="truncate drop-shadow-sm">{details.title}</span>
-        <span className="text-[11px] bg-[#1a1a1a]/90 border border-white/10 px-2.5 py-0.5 rounded-[8px] text-yt-subtext ml-4 flex-shrink-0 font-mono">
-          {activeBadgeText}
-        </span>
-      </div>
+      {/* Top Overlay: Minimal PiP Floating Actions OR Normal Title Bar */}
+      {isPipMode ? (
+        <div
+          style={{
+            background: 'linear-gradient(to bottom, rgba(0,0,0,0.82) 0%, rgba(0,0,0,0) 100%)',
+          }}
+          className={`absolute top-0 left-0 right-0 px-2.5 pt-2 pb-5 flex items-center justify-between gap-2 text-white z-20 transition-[opacity,transform] duration-200 ease-out ${
+            isControlsVisible
+              ? 'opacity-100 translate-y-0'
+              : 'opacity-0 -translate-y-2 pointer-events-none'
+          }`}
+        >
+          <button
+            type="button"
+            data-pip-no-drag="true"
+            onClick={() => onExitPip?.()}
+            className="flex items-center justify-center w-8 h-8 rounded-[6px] bg-black/75 hover:bg-black/95 border border-white/15 text-white transition-colors flex-shrink-0"
+            title="Phóng to về giao diện chính (Esc / P)"
+          >
+            <Maximize2 className="w-3.5 h-3.5" />
+          </button>
+
+          <span className="flex-1 text-[11px] font-semibold text-white/90 truncate text-center pointer-events-none px-1">
+            {details.title}
+          </span>
+
+          <button
+            type="button"
+            data-pip-no-drag="true"
+            onClick={() => onClosePip?.()}
+            className="flex items-center justify-center w-8 h-8 rounded-[6px] bg-black/75 hover:bg-yt-red border border-white/15 hover:border-yt-red text-white transition-colors flex-shrink-0"
+            title="Đóng cửa sổ nổi"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      ) : (
+        <div
+          style={{
+            background: 'linear-gradient(to bottom, rgba(0,0,0,0.78) 0%, rgba(0,0,0,0) 100%)',
+          }}
+          className={`absolute top-0 left-0 right-0 px-5 pt-3.5 pb-6 flex items-center justify-between text-white text-sm font-semibold z-20 transition-[opacity,transform] duration-300 ease-out ${
+            isControlsVisible
+              ? 'opacity-100 translate-y-0'
+              : 'opacity-0 -translate-y-3 pointer-events-none'
+          }`}
+        >
+          <span className="truncate drop-shadow-sm">{details.title}</span>
+          <span className="text-[11px] bg-[#1a1a1a]/90 border border-white/10 px-2.5 py-0.5 rounded-[8px] text-yt-subtext ml-4 flex-shrink-0 font-mono">
+            {activeBadgeText}
+          </span>
+        </div>
+      )}
 
       {/* Center Play Indicator when Paused */}
       {!isPlaying && !isBuffering && !playbackError && (
         <button
           type="button"
+          data-pip-no-drag="true"
           onClick={togglePlay}
-          className="absolute z-20 w-16 h-16 rounded-full bg-black/75 border border-white/15 flex items-center justify-center text-white hover:bg-yt-red hover:border-yt-red hover:scale-105 transition-all duration-200 shadow-2xl"
+          className={`absolute z-20 rounded-full bg-black/75 border border-white/15 flex items-center justify-center text-white hover:bg-yt-red hover:border-yt-red hover:scale-105 transition-all duration-200 shadow-2xl ${
+            isPipMode ? 'w-11 h-11' : 'w-16 h-16'
+          }`}
           title="Phát (Space)"
         >
-          <Play className="w-7 h-7 fill-current ml-0.5" />
+          <Play className={`${isPipMode ? 'w-5 h-5' : 'w-7 h-7'} fill-current ml-0.5`} />
         </button>
       )}
 
       {/* Bottom Controls & Seekbar Overlay (Smooth opacity + translateY, soft bottom gradient, zero blur) */}
       <div
+        data-pip-no-drag="true"
         onMouseEnter={() => {
           isHoveringControlsRef.current = true;
           setShowControls(true);
@@ -1057,13 +1358,15 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
           background:
             'linear-gradient(to top, rgba(0,0,0,0.88) 0%, rgba(0,0,0,0.48) 65%, rgba(0,0,0,0) 100%)',
         }}
-        className={`absolute bottom-0 left-0 right-0 px-4 pt-8 pb-3.5 flex flex-col space-y-2 z-20 transition-[opacity,transform] duration-300 ease-out ${
+        className={`absolute bottom-0 left-0 right-0 flex flex-col z-20 transition-[opacity,transform] duration-300 ease-out ${
+          isPipMode ? 'px-2.5 pt-5 pb-2 space-y-1' : 'px-4 pt-8 pb-3.5 space-y-2'
+        } ${
           isControlsVisible
             ? 'opacity-100 translate-y-0'
             : 'opacity-0 translate-y-3 pointer-events-none'
         }`}
       >
-        {/* Modern Cinema Seekbar (3.5px normal -> 6px on hover, buffered bar, thumb dot, time tooltip) */}
+        {/* Modern Cinema Seekbar (thin red bar, buffered layer, thumb dot, time tooltip) */}
         <div
           ref={seekbarRef}
           onMouseDown={handleSeekbarMouseDown}
@@ -1076,7 +1379,9 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
               setHoverRatio(null);
             }
           }}
-          className="relative h-5 flex items-center cursor-pointer group/seek select-none"
+          className={`relative flex items-center cursor-pointer group/seek select-none ${
+            isPipMode ? 'h-4' : 'h-5'
+          }`}
         >
           {/* Floating Time Tooltip on Hover / Scrub */}
           {hoverRatio !== null && duration > 0 && (
@@ -1084,16 +1389,29 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
               style={{
                 left: `${Math.min(95, Math.max(5, hoverRatio * 100))}%`,
               }}
-              className="absolute -top-8 -translate-x-1/2 bg-[#141414]/95 border border-white/15 text-white text-[11px] font-mono font-semibold px-2 py-0.5 rounded-[6px] shadow-lg pointer-events-none whitespace-nowrap z-30"
+              className={`absolute -translate-x-1/2 bg-[#141414]/95 border border-white/15 text-white font-mono font-semibold rounded-[6px] shadow-lg pointer-events-none whitespace-nowrap z-30 flex flex-col items-center ${
+                isPipMode ? '-top-6 text-[10px] px-1.5 py-0.5' : hoveredChapter ? '-top-12 text-[11px] px-2.5 py-1' : '-top-8 text-[11px] px-2 py-0.5'
+              }`}
             >
-              {formatTime(hoverRatio * duration, isMultiHourVideo)}
+              {!isPipMode && hoveredChapter && (
+                <span className="font-sans text-[10px] font-semibold text-white/90 max-w-[200px] truncate leading-tight mb-0.5">
+                  {hoveredChapter.title}
+                </span>
+              )}
+              <span>{formatTime(hoverRatio * duration, isMultiHourVideo)}</span>
             </div>
           )}
 
           {/* Track Background */}
           <div
             className={`relative w-full bg-white/20 rounded-full transition-[height] duration-150 ${
-              isScrubbing ? 'h-[6px]' : 'h-[3.5px] group-hover/seek:h-[6px]'
+              isPipMode
+                ? isScrubbing
+                  ? 'h-[5px]'
+                  : 'h-[3px] group-hover/seek:h-[5px]'
+                : isScrubbing
+                  ? 'h-[6px]'
+                  : 'h-[3.5px] group-hover/seek:h-[6px]'
             }`}
           >
             {/* Buffered Progress Layer (Translucent White) */}
@@ -1131,56 +1449,85 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
               className="absolute left-0 top-0 bottom-0 bg-yt-red rounded-full pointer-events-none z-10"
             />
 
+            {/* Chapter Boundary Notches */}
+            {chapters.map((ch) => {
+              if (duration <= 0 || ch.startSec <= 0 || ch.startSec >= duration) return null;
+              const left = (ch.startSec / duration) * 100;
+              return (
+                <div
+                  key={`chap-mark-${ch.startSec}`}
+                  style={{ left: `${left}%` }}
+                  className="absolute top-0 bottom-0 w-[2px] -translate-x-1/2 bg-black/80 pointer-events-none z-20"
+                />
+              );
+            })}
+
             {/* Thumb Handle (Dot appears smoothly on hover or drag) */}
             <div
               style={{ left: `${playedPercent}%` }}
-              className={`absolute top-1/2 -translate-x-1/2 -translate-y-1/2 w-3.5 h-3.5 bg-yt-red rounded-full shadow-md pointer-events-none z-20 transition-transform duration-150 ${
-                isScrubbing ? 'scale-110' : 'scale-0 group-hover/seek:scale-100'
-              }`}
+              className={`absolute top-1/2 -translate-x-1/2 -translate-y-1/2 bg-yt-red rounded-full shadow-md pointer-events-none z-20 transition-transform duration-150 ${
+                isPipMode ? 'w-3 h-3' : 'w-3.5 h-3.5'
+              } ${isScrubbing ? 'scale-110' : 'scale-0 group-hover/seek:scale-100'}`}
             />
           </div>
         </div>
 
         {/* Controls Buttons Row */}
-        <div className="flex items-center justify-between text-white text-xs">
+        <div className="flex items-center justify-between text-white text-xs gap-1">
           {/* Left Controls */}
-          <div className="flex items-center space-x-2.5">
+          <div className={`flex items-center min-w-0 ${isPipMode ? 'space-x-1' : 'space-x-2.5'}`}>
             <button
               type="button"
               onClick={togglePlay}
-              className="p-1.5 rounded-[8px] hover:bg-white/10 hover:text-white transition-colors"
+              className={`${isPipMode ? 'p-1 rounded-[6px]' : 'p-1.5 rounded-[8px]'} hover:bg-white/10 hover:text-white transition-colors flex-shrink-0`}
               title={isPlaying ? 'Tạm dừng (K / Space)' : 'Phát (K / Space)'}
             >
-              {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current" />}
+              {isPlaying ? (
+                <Pause className={`${isPipMode ? 'w-4 h-4' : 'w-5 h-5'} fill-current`} />
+              ) : (
+                <Play className={`${isPipMode ? 'w-4 h-4' : 'w-5 h-5'} fill-current`} />
+              )}
             </button>
 
             <button
               type="button"
               onClick={() => seek(currentTimeRef.current - 10)}
-              className="p-1.5 rounded-[8px] hover:bg-white/10 text-yt-subtext hover:text-white transition-colors"
+              className={`${
+                isPipMode
+                  ? 'hidden min-[380px]:inline-flex p-1 rounded-[6px]'
+                  : 'p-1.5 rounded-[8px]'
+              } hover:bg-white/10 text-yt-subtext hover:text-white transition-colors flex-shrink-0`}
               title="Lùi 10s (J)"
             >
-              <RotateCcw className="w-4 h-4" />
+              <RotateCcw className={`${isPipMode ? 'w-3.5 h-3.5' : 'w-4 h-4'}`} />
             </button>
 
             <button
               type="button"
               onClick={() => seek(currentTimeRef.current + 10)}
-              className="p-1.5 rounded-[8px] hover:bg-white/10 text-yt-subtext hover:text-white transition-colors"
+              className={`${
+                isPipMode
+                  ? 'hidden min-[380px]:inline-flex p-1 rounded-[6px]'
+                  : 'p-1.5 rounded-[8px]'
+              } hover:bg-white/10 text-yt-subtext hover:text-white transition-colors flex-shrink-0`}
               title="Tới 10s (L)"
             >
-              <RotateCw className="w-4 h-4" />
+              <RotateCw className={`${isPipMode ? 'w-3.5 h-3.5' : 'w-4 h-4'}`} />
             </button>
 
             {/* Volume Control */}
-            <div className="flex items-center space-x-1.5 pl-1">
+            <div className={`flex items-center flex-shrink-0 ${isPipMode ? 'space-x-1 pl-0.5' : 'space-x-1.5 pl-1'}`}>
               <button
                 type="button"
                 onClick={toggleMute}
-                className="p-1.5 rounded-[8px] hover:bg-white/10 text-yt-subtext hover:text-white transition-colors"
+                className={`${isPipMode ? 'p-1 rounded-[6px]' : 'p-1.5 rounded-[8px]'} hover:bg-white/10 text-yt-subtext hover:text-white transition-colors`}
                 title="Tắt/Bật tiếng (M)"
               >
-                {isMuted || volume === 0 ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+                {isMuted || volume === 0 ? (
+                  <VolumeX className={`${isPipMode ? 'w-3.5 h-3.5' : 'w-4 h-4'}`} />
+                ) : (
+                  <Volume2 className={`${isPipMode ? 'w-3.5 h-3.5' : 'w-4 h-4'}`} />
+                )}
               </button>
               <input
                 type="range"
@@ -1189,218 +1536,305 @@ export const AvSyncPlayer: React.FC<AvSyncPlayerProps> = ({
                 step="0.05"
                 value={isMuted ? 0 : volume}
                 onChange={(e) => handleVolumeChange(parseFloat(e.target.value))}
-                className="w-16 h-1 accent-yt-red cursor-pointer"
+                className={`${isPipMode ? 'w-10' : 'w-16'} h-1 accent-yt-red cursor-pointer`}
               />
             </div>
 
             {/* Time Display */}
-            <span className="text-[11px] text-white/85 font-mono pl-2 tracking-tight">
+            <span
+              className={`text-white/85 font-mono tracking-tight whitespace-nowrap ${
+                isPipMode ? 'text-[10px] pl-1 truncate' : 'text-[11px] pl-2 flex-shrink-0'
+              }`}
+            >
               {formatTime(effectiveTime, isMultiHourVideo)}{' '}
               <span className="text-white/40">/</span>{' '}
               <span className="text-white/65">{formatTime(duration, isMultiHourVideo)}</span>
             </span>
+
+            {/* Current Chapter Display & Chapters Switcher (Normal Player Mode) */}
+            {!isPipMode && chapters.length > 0 && (
+              <div className="relative min-w-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowChaptersMenu((prev) => !prev);
+                    setShowQualityMenu(false);
+                    setShowSpeedMenu(false);
+                    setShowCcMenu(false);
+                  }}
+                  className={`flex items-center space-x-1.5 px-2 py-1 rounded-[8px] transition-colors max-w-[180px] xl:max-w-[260px] ${
+                    showChaptersMenu
+                      ? 'bg-white/15 text-white'
+                      : 'hover:bg-white/10 text-white/85 hover:text-white'
+                  }`}
+                  title="Danh sách phân đoạn (Chapters)"
+                >
+                  <ListVideo className="w-3.5 h-3.5 text-[#3ea6ff] flex-shrink-0" />
+                  <span className="text-[11px] font-medium truncate">
+                    {activeChapter ? activeChapter.title : chapters[0].title}
+                  </span>
+                </button>
+
+                {showChaptersMenu && (
+                  <div className="absolute bottom-10 left-0 bg-[#141414]/95 border border-white/10 rounded-[8px] py-1.5 w-72 max-h-64 overflow-y-auto shadow-2xl text-xs z-30">
+                    <div className="px-3 py-1 font-semibold text-yt-subtext border-b border-white/10 flex items-center justify-between">
+                      <span>Phân đoạn ({chapters.length})</span>
+                    </div>
+                    {chapters.map((ch) => {
+                      const isCurrent = activeChapter?.startSec === ch.startSec;
+                      return (
+                        <button
+                          key={`chap-${ch.startSec}`}
+                          type="button"
+                          onClick={() => {
+                            seekAndPlay(ch.startSec);
+                            setShowChaptersMenu(false);
+                          }}
+                          className={`flex items-start space-x-2.5 w-full px-3 py-2 text-left transition-colors ${
+                            isCurrent ? 'bg-white/10 text-white' : 'hover:bg-white/10 text-yt-text'
+                          }`}
+                        >
+                          <span className="text-[#3ea6ff] font-mono font-semibold text-[11px] flex-shrink-0 mt-0.5">
+                            {ch.timestampText}
+                          </span>
+                          <span className="line-clamp-2 leading-snug flex-1">{ch.title}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Right Controls */}
-          <div className="flex items-center space-x-1.5 relative">
-            {/* Quick Switch to 720p Direct MP4 (itag 22 / 18) */}
-            {muxedFallbackSrc && (
+          {isPipMode ? (
+            <div className="flex items-center flex-shrink-0">
               <button
                 type="button"
-                onClick={() => {
-                  const nextMode: StreamMode = streamMode === 'muxed' && hlsUrl ? 'hls' : 'muxed';
-                  setStreamMode(nextMode);
-                  showToast(
-                    nextMode === 'muxed'
-                      ? 'Đã chuyển sang 720p Trực tiếp (MP4 gộp)'
-                      : 'Đã quay lại luồng HLS chất lượng cao'
-                  );
-                }}
-                className={`px-2.5 py-1 rounded-[8px] text-[11px] font-semibold border transition-colors ${
-                  streamMode === 'muxed'
-                    ? 'bg-yt-red text-white border-yt-red shadow'
-                    : 'bg-white/[0.06] text-yt-subtext border-white/10 hover:text-white hover:bg-white/15'
-                }`}
-                title="Chuyển ngay sang luồng MP4 gộp hình+tiếng (itag 22/18) nếu bị lag hoặc YouTube bóp băng thông"
+                onClick={() => onExitPip?.()}
+                className="p-1.5 rounded-[6px] hover:bg-white/15 text-yt-subtext hover:text-white transition-colors"
+                title="Phóng to về cửa sổ chính (Esc / P)"
               >
-                720p Trực tiếp
+                <Maximize2 className="w-3.5 h-3.5" />
               </button>
-            )}
+            </div>
+          ) : (
+            <div className="flex items-center space-x-1.5 relative">
+              {/* Quick Switch to 720p Direct MP4 (itag 22 / 18) */}
+              {muxedFallbackSrc && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const nextMode: StreamMode = streamMode === 'muxed' && hlsUrl ? 'hls' : 'muxed';
+                    setStreamMode(nextMode);
+                    showToast(
+                      nextMode === 'muxed'
+                        ? 'Đã chuyển sang 720p Trực tiếp (MP4 gộp)'
+                        : 'Đã quay lại luồng HLS chất lượng cao'
+                    );
+                  }}
+                  className={`px-2.5 py-1 rounded-[8px] text-[11px] font-semibold border transition-colors ${
+                    streamMode === 'muxed'
+                      ? 'bg-yt-red text-white border-yt-red shadow'
+                      : 'bg-white/[0.06] text-yt-subtext border-white/10 hover:text-white hover:bg-white/15'
+                  }`}
+                  title="Chuyển ngay sang luồng MP4 gộp hình+tiếng (itag 22/18) nếu bị lag hoặc YouTube bóp băng thông"
+                >
+                  720p Trực tiếp
+                </button>
+              )}
 
-            {/* Subtitles CC Toggle */}
-            {details.captionTracks.length > 0 && (
+              {/* Subtitles CC Toggle */}
+              {details.captionTracks.length > 0 && (
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!isCcEnabled) {
+                        userRequestedCcRef.current = true;
+                        setIsCcEnabled(true);
+                        showToast('Đang tải phụ đề...');
+                      } else {
+                        setShowCcMenu(!showCcMenu);
+                        setShowSpeedMenu(false);
+                        setShowQualityMenu(false);
+                        setShowChaptersMenu(false);
+                      }
+                    }}
+                    className={`p-1.5 rounded-[8px] hover:bg-white/10 transition-colors ${
+                      isCcEnabled ? 'text-white border-b-2 border-yt-red' : 'text-yt-subtext hover:text-white'
+                    }`}
+                    title={isCcLoading ? 'Đang tải phụ đề...' : 'Phụ đề (CC)'}
+                  >
+                    <Subtitles className={`w-4 h-4 ${isCcLoading ? 'animate-pulse' : ''}`} />
+                  </button>
+
+                  {showCcMenu && (
+                    <div className="absolute bottom-10 right-0 bg-[#141414]/95 border border-white/10 rounded-[8px] py-1.5 w-48 shadow-2xl text-xs z-30">
+                      <div className="px-3 py-1 font-semibold text-yt-subtext border-b border-white/10">Phụ đề</div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsCcEnabled(false);
+                          setShowCcMenu(false);
+                        }}
+                        className="flex items-center justify-between w-full px-3 py-1.5 hover:bg-white/10 text-left transition-colors"
+                      >
+                        <span>Tắt phụ đề</span>
+                        {!isCcEnabled && <Check className="w-3.5 h-3.5 text-yt-red" />}
+                      </button>
+                      {details.captionTracks.map((track) => (
+                        <button
+                          key={track.languageTag}
+                          type="button"
+                          onClick={() => {
+                            userRequestedCcRef.current = true;
+                            setActiveCaption(track);
+                            setIsCcEnabled(true);
+                            setShowCcMenu(false);
+                          }}
+                          className="flex items-center justify-between w-full px-3 py-1.5 hover:bg-white/10 text-left truncate transition-colors"
+                        >
+                          <span className="truncate">{track.label}</span>
+                          {isCcEnabled && activeCaption?.languageTag === track.languageTag && (
+                            <Check className="w-3.5 h-3.5 text-yt-red flex-shrink-0" />
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Playback Speed Menu */}
               <div className="relative">
                 <button
                   type="button"
                   onClick={() => {
-                    if (!isCcEnabled) {
-                      userRequestedCcRef.current = true;
-                      setIsCcEnabled(true);
-                      showToast('Đang tải phụ đề...');
-                    } else {
-                      setShowCcMenu(!showCcMenu);
-                      setShowSpeedMenu(false);
-                      setShowQualityMenu(false);
-                    }
+                    setShowSpeedMenu(!showSpeedMenu);
+                    setShowCcMenu(false);
+                    setShowQualityMenu(false);
+                    setShowChaptersMenu(false);
                   }}
-                  className={`p-1.5 rounded-[8px] hover:bg-white/10 transition-colors ${
-                    isCcEnabled ? 'text-white border-b-2 border-yt-red' : 'text-yt-subtext hover:text-white'
-                  }`}
-                  title={isCcLoading ? 'Đang tải phụ đề...' : 'Phụ đề (CC)'}
+                  className="px-2 py-1 rounded-[8px] hover:bg-white/10 text-yt-subtext hover:text-white text-[11px] font-semibold transition-colors"
+                  title="Tốc độ phát"
                 >
-                  <Subtitles className={`w-4 h-4 ${isCcLoading ? 'animate-pulse' : ''}`} />
+                  {playbackRate}x
                 </button>
 
-                {showCcMenu && (
-                  <div className="absolute bottom-10 right-0 bg-[#141414]/95 border border-white/10 rounded-[8px] py-1.5 w-48 shadow-2xl text-xs z-30">
-                    <div className="px-3 py-1 font-semibold text-yt-subtext border-b border-white/10">Phụ đề</div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsCcEnabled(false);
-                        setShowCcMenu(false);
-                      }}
-                      className="flex items-center justify-between w-full px-3 py-1.5 hover:bg-white/10 text-left transition-colors"
-                    >
-                      <span>Tắt phụ đề</span>
-                      {!isCcEnabled && <Check className="w-3.5 h-3.5 text-yt-red" />}
-                    </button>
-                    {details.captionTracks.map((track) => (
+                {showSpeedMenu && (
+                  <div className="absolute bottom-10 right-0 bg-[#141414]/95 border border-white/10 rounded-[8px] py-1.5 w-28 shadow-2xl text-xs z-30">
+                    <div className="px-3 py-1 font-semibold text-yt-subtext border-b border-white/10">Tốc độ</div>
+                    {[0.5, 0.75, 1, 1.25, 1.5, 2].map((r) => (
                       <button
-                        key={track.languageTag}
+                        key={r}
                         type="button"
-                        onClick={() => {
-                          userRequestedCcRef.current = true;
-                          setActiveCaption(track);
-                          setIsCcEnabled(true);
-                          setShowCcMenu(false);
-                        }}
-                        className="flex items-center justify-between w-full px-3 py-1.5 hover:bg-white/10 text-left truncate transition-colors"
+                        onClick={() => handleSpeedChange(r)}
+                        className="flex items-center justify-between w-full px-3 py-1.5 hover:bg-white/10 text-left transition-colors"
                       >
-                        <span className="truncate">{track.label}</span>
-                        {isCcEnabled && activeCaption?.languageTag === track.languageTag && (
-                          <Check className="w-3.5 h-3.5 text-yt-red flex-shrink-0" />
-                        )}
+                        <span>{r === 1 ? 'Chuẩn' : `${r}x`}</span>
+                        {playbackRate === r && <Check className="w-3.5 h-3.5 text-yt-red" />}
                       </button>
                     ))}
                   </div>
                 )}
               </div>
-            )}
 
-            {/* Playback Speed Menu */}
-            <div className="relative">
+              {/* Quality Settings Menu */}
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowQualityMenu(!showQualityMenu);
+                    setShowCcMenu(false);
+                    setShowSpeedMenu(false);
+                    setShowChaptersMenu(false);
+                  }}
+                  className="p-1.5 rounded-[8px] hover:bg-white/10 text-yt-subtext hover:text-white transition-colors"
+                  title="Chất lượng hình ảnh"
+                >
+                  <Settings className="w-4 h-4" />
+                </button>
+
+                {showQualityMenu && (
+                  <div className="absolute bottom-10 right-0 bg-[#141414]/95 border border-white/10 rounded-[8px] py-1.5 w-48 shadow-2xl text-xs z-30">
+                    <div className="px-3 py-1 font-semibold text-yt-subtext border-b border-white/10">Chất lượng</div>
+                    {availableQualities.map((q) => {
+                      const isHdr = details.hdrQualities.includes(q);
+                      return (
+                        <button
+                          key={q}
+                          type="button"
+                          onClick={() => handleQualityChange(q)}
+                          className="flex items-center justify-between w-full px-3 py-1.5 hover:bg-white/10 text-left transition-colors"
+                        >
+                          <span>
+                            {q}p {isHdr ? 'HDR' : ''}
+                          </span>
+                          {streamMode === 'hls' && currentQuality === q && (
+                            <Check className="w-3.5 h-3.5 text-yt-red" />
+                          )}
+                        </button>
+                      );
+                    })}
+
+                    {muxedFallbackSrc && (
+                      <div className="pt-1 mt-1 border-t border-white/10">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const nextMode: StreamMode = streamMode === 'muxed' && hlsUrl ? 'hls' : 'muxed';
+                            setStreamMode(nextMode);
+                            setShowQualityMenu(false);
+                            showToast(
+                              nextMode === 'muxed' ? 'Đã bật MP4 gộp (itag 22/18)' : 'Đã bật HLS chính chủ'
+                            );
+                          }}
+                          className="flex items-center justify-between w-full px-3 py-1.5 hover:bg-white/10 text-left text-yt-subtext hover:text-white transition-colors"
+                        >
+                          <span className="truncate">Chế độ MP4 gộp trực tiếp</span>
+                          {streamMode === 'muxed' && <Check className="w-3.5 h-3.5 text-yt-red flex-shrink-0" />}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Theater Mode Toggle */}
               <button
                 type="button"
-                onClick={() => {
-                  setShowSpeedMenu(!showSpeedMenu);
-                  setShowCcMenu(false);
-                  setShowQualityMenu(false);
-                }}
-                className="px-2 py-1 rounded-[8px] hover:bg-white/10 text-yt-subtext hover:text-white text-[11px] font-semibold transition-colors"
-                title="Tốc độ phát"
-              >
-                {playbackRate}x
-              </button>
-
-              {showSpeedMenu && (
-                <div className="absolute bottom-10 right-0 bg-[#141414]/95 border border-white/10 rounded-[8px] py-1.5 w-28 shadow-2xl text-xs z-30">
-                  <div className="px-3 py-1 font-semibold text-yt-subtext border-b border-white/10">Tốc độ</div>
-                  {[0.5, 0.75, 1, 1.25, 1.5, 2].map((r) => (
-                    <button
-                      key={r}
-                      type="button"
-                      onClick={() => handleSpeedChange(r)}
-                      className="flex items-center justify-between w-full px-3 py-1.5 hover:bg-white/10 text-left transition-colors"
-                    >
-                      <span>{r === 1 ? 'Chuẩn' : `${r}x`}</span>
-                      {playbackRate === r && <Check className="w-3.5 h-3.5 text-yt-red" />}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Quality Settings Menu */}
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => {
-                  setShowQualityMenu(!showQualityMenu);
-                  setShowCcMenu(false);
-                  setShowSpeedMenu(false);
-                }}
+                onClick={onToggleTheater}
                 className="p-1.5 rounded-[8px] hover:bg-white/10 text-yt-subtext hover:text-white transition-colors"
-                title="Chất lượng hình ảnh"
+                title={isTheater ? 'Chế độ mặc định (T)' : 'Chế độ rạp hát (T)'}
               >
-                <Settings className="w-4 h-4" />
+                <Tv className={`w-4 h-4 ${isTheater ? 'text-yt-red' : ''}`} />
               </button>
 
-              {showQualityMenu && (
-                <div className="absolute bottom-10 right-0 bg-[#141414]/95 border border-white/10 rounded-[8px] py-1.5 w-48 shadow-2xl text-xs z-30">
-                  <div className="px-3 py-1 font-semibold text-yt-subtext border-b border-white/10">Chất lượng</div>
-                  {availableQualities.map((q) => {
-                    const isHdr = details.hdrQualities.includes(q);
-                    return (
-                      <button
-                        key={q}
-                        type="button"
-                        onClick={() => handleQualityChange(q)}
-                        className="flex items-center justify-between w-full px-3 py-1.5 hover:bg-white/10 text-left transition-colors"
-                      >
-                        <span>
-                          {q}p {isHdr ? 'HDR' : ''}
-                        </span>
-                        {streamMode === 'hls' && currentQuality === q && (
-                          <Check className="w-3.5 h-3.5 text-yt-red" />
-                        )}
-                      </button>
-                    );
-                  })}
-
-                  {muxedFallbackSrc && (
-                    <div className="pt-1 mt-1 border-t border-white/10">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const nextMode: StreamMode = streamMode === 'muxed' && hlsUrl ? 'hls' : 'muxed';
-                          setStreamMode(nextMode);
-                          setShowQualityMenu(false);
-                          showToast(
-                            nextMode === 'muxed' ? 'Đã bật MP4 gộp (itag 22/18)' : 'Đã bật HLS chính chủ'
-                          );
-                        }}
-                        className="flex items-center justify-between w-full px-3 py-1.5 hover:bg-white/10 text-left text-yt-subtext hover:text-white transition-colors"
-                      >
-                        <span className="truncate">Chế độ MP4 gộp trực tiếp</span>
-                        {streamMode === 'muxed' && <Check className="w-3.5 h-3.5 text-yt-red flex-shrink-0" />}
-                      </button>
-                    </div>
-                  )}
-                </div>
+              {/* PiP Floating Mini Window Toggle */}
+              {onTogglePip && (
+                <button
+                  type="button"
+                  onClick={handleTogglePipClick}
+                  className="p-1.5 rounded-[8px] hover:bg-white/10 text-yt-subtext hover:text-white transition-colors"
+                  title="Cửa sổ nổi / PiP (P)"
+                >
+                  <PictureInPicture2 className="w-4 h-4" />
+                </button>
               )}
+
+              {/* Fullscreen Toggle */}
+              <button
+                type="button"
+                onClick={toggleFullscreen}
+                className="p-1.5 rounded-[8px] hover:bg-white/10 text-yt-subtext hover:text-white transition-colors"
+                title="Toàn màn hình (F)"
+              >
+                {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
+              </button>
             </div>
-
-            {/* Theater Mode Toggle */}
-            <button
-              type="button"
-              onClick={onToggleTheater}
-              className="p-1.5 rounded-[8px] hover:bg-white/10 text-yt-subtext hover:text-white transition-colors"
-              title={isTheater ? 'Chế độ mặc định (T)' : 'Chế độ rạp hát (T)'}
-            >
-              <Tv className={`w-4 h-4 ${isTheater ? 'text-yt-red' : ''}`} />
-            </button>
-
-            {/* Fullscreen Toggle */}
-            <button
-              type="button"
-              onClick={toggleFullscreen}
-              className="p-1.5 rounded-[8px] hover:bg-white/10 text-yt-subtext hover:text-white transition-colors"
-              title="Toàn màn hình (F)"
-            >
-              {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
-            </button>
-          </div>
+          )}
         </div>
       </div>
     </div>

@@ -15,7 +15,12 @@ import {
   Maximize2,
   RefreshCw,
 } from 'lucide-react';
-import { desktopAPI } from '../api.js';
+import {
+  desktopAPI,
+  initProxyPort,
+  getProxyBaseUrl,
+  extractProxyPortFromUrl,
+} from '../api.js';
 import { ShortVideoItem, TayTubeVideoDetails, VideoItemUI } from '../types.js';
 
 interface ShortsScreenProps {
@@ -181,13 +186,17 @@ export const ShortsScreen: React.FC<ShortsScreenProps> = ({
           details.selectedStreams?.muxed ||
           details.allVideoStreams?.find((v) => v.isMuxed && v.url) ||
           null;
+        const activePort =
+          extractProxyPortFromUrl(details.proxyHlsUrl || details.proxyVideoUrl) ??
+          (await initProxyPort());
+        const proxyBase = getProxyBaseUrl(activePort);
         const hlsUrl =
           details.proxyHlsUrl ||
           (details.hlsManifestUrl
-            ? `http://127.0.0.1:8989/hls.m3u8?url=${encodeURIComponent(details.hlsManifestUrl)}&id=${encodeURIComponent(details.id)}`
+            ? `${proxyBase}/hls.m3u8?url=${encodeURIComponent(details.hlsManifestUrl)}&id=${encodeURIComponent(details.id)}`
             : null);
         const directProxyUrl = muxed
-          ? `http://127.0.0.1:8989/stream?url=${encodeURIComponent(muxed.url)}&id=${encodeURIComponent(details.id)}&itag=${muxed.itag}`
+          ? `${proxyBase}/stream?url=${encodeURIComponent(muxed.url)}&id=${encodeURIComponent(details.id)}&itag=${muxed.itag}`
           : details.proxyVideoUrl || null;
 
         if (hlsUrl && shaka.Player.isBrowserSupported()) {

@@ -14,13 +14,15 @@ use url::Url;
 use crate::youtube::{resolve_client_user_agent, YouTubeService, CLIENT_VISIONOS, CLIENT_WEB};
 
 pub const PROXY_HOST: &str = "127.0.0.1";
-pub const PROXY_PORT: u16 = 8989;
+pub const PROXY_PORT_START: u16 = 8989;
+pub const PROXY_PORT_END: u16 = 8999;
 pub const MAX_RANGE_CHUNK_BYTES: u64 = 2 * 1024 * 1024; // 2MB cap per chunk
 
 #[derive(Clone)]
-pub struct ProxyState {
+pub struct ProxyRouterState {
     pub http: reqwest::Client,
     pub yt: Arc<YouTubeService>,
+    pub port: u16,
 }
 
 #[derive(Debug, Deserialize)]
@@ -43,7 +45,66 @@ pub struct SubtitleQuery {
     pub url: String,
 }
 
-pub async fn start_proxy_server(yt: Arc<YouTubeService>) {
+/// Tries to bind sequentially across `start_port..=end_port`, falling back to
+/// `127.0.0.1:0` so OS allocates an ephemeral free port if all preferred ports are busy.
+pub fn bind_proxy_listener_in_range(
+    start_port: u16,
+    end_port: u16,
+) -> Result<(std::net::TcpListener, u16), String> {
+    let lo = start_port.min(end_port);
+    let hi = start_port.max(end_port);
+    let mut last_err = None;
+
+    for port in lo..=hi {
+        match std::net::TcpListener::bind((PROXY_HOST, port)) {
+            Ok(listener) => {
+                listener
+                    .set_nonblocking(true)
+                    .map_err(|e| format!("Failed to configure proxy listener: {e}"))?;
+                let actual_port = listener
+                    .local_addr()
+                    .map_err(|e| format!("Failed to read bound proxy port: {e}"))?
+                    .port();
+                return Ok((listener, actual_port));
+            }
+            Err(e) => {
+                last_err = Some(e);
+            }
+        }
+    }
+
+    match std::net::TcpListener::bind((PROXY_HOST, 0)) {
+        Ok(listener) => {
+            listener
+                .set_nonblocking(true)
+                .map_err(|e| format!("Failed to configure fallback proxy listener: {e}"))?;
+            let actual_port = listener
+                .local_addr()
+                .map_err(|e| format!("Failed to read fallback proxy port: {e}"))?
+                .port();
+            if let Some(prev_err) = last_err {
+                eprintln!(
+                    "[TayTube Proxy] Ports {lo}..={hi} busy ({prev_err}); using OS ephemeral port {actual_port}"
+                );
+            }
+            Ok((listener, actual_port))
+        }
+        Err(e) => Err(format!(
+            "Failed to bind local proxy on {lo}..={hi} or ephemeral port: {e}"
+        )),
+    }
+}
+
+pub fn bind_proxy_listener() -> Result<(std::net::TcpListener, u16), String> {
+    bind_proxy_listener_in_range(PROXY_PORT_START, PROXY_PORT_END)
+}
+
+pub async fn start_proxy_server(
+    std_listener: std::net::TcpListener,
+    port: u16,
+    yt: Arc<YouTubeService>,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+) {
     // Dedicated streaming client: keep-alive pool, connect timeout only (never drop long streams mid-transfer)
     let http = match reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(15))
@@ -58,7 +119,15 @@ pub async fn start_proxy_server(yt: Arc<YouTubeService>) {
         }
     };
 
-    let state = ProxyState { http, yt };
+    let listener = match tokio::net::TcpListener::from_std(std_listener) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[TayTube Proxy] Failed to attach Tokio TcpListener on port {port}: {e}");
+            return;
+        }
+    };
+
+    let state = ProxyRouterState { http, yt, port };
 
     let app = Router::new()
         .route("/stream", get(handle_stream).options(handle_cors_preflight))
@@ -71,16 +140,14 @@ pub async fn start_proxy_server(yt: Arc<YouTubeService>) {
         .route("/subtitle", get(handle_subtitle).options(handle_cors_preflight))
         .with_state(state);
 
-    let addr = format!("{PROXY_HOST}:{PROXY_PORT}");
-    match tokio::net::TcpListener::bind(&addr).await {
-        Ok(listener) => {
-            if let Err(e) = axum::serve(listener, app).await {
-                eprintln!("[TayTube Proxy] Server exited with error: {e}");
-            }
-        }
-        Err(e) => {
-            eprintln!("[TayTube Proxy] Failed to bind {addr}: {e}");
-        }
+    eprintln!("[TayTube Proxy] Listening on http://{PROXY_HOST}:{port}");
+    if let Err(e) = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+    {
+        eprintln!("[TayTube Proxy] Server exited with error: {e}");
     }
 }
 
@@ -118,7 +185,7 @@ fn text_error(status: StatusCode, msg: String) -> Response {
 }
 
 async fn handle_hls_manifest(
-    State(state): State<ProxyState>,
+    State(state): State<ProxyRouterState>,
     Query(q): Query<HlsManifestQuery>,
 ) -> Response {
     let video_id = q.id.unwrap_or_default();
@@ -183,7 +250,13 @@ async fn handle_hls_manifest(
         }
     };
 
-    let rewritten = rewrite_m3u8(&raw_m3u8, &final_url, &video_id, hls_client_name);
+    let rewritten = rewrite_m3u8(
+        &raw_m3u8,
+        &final_url,
+        &video_id,
+        hls_client_name,
+        state.port,
+    );
     let mut res = Response::new(Body::from(rewritten));
     *res.status_mut() = StatusCode::OK;
     apply_cors_headers(res.headers_mut());
@@ -199,7 +272,7 @@ async fn handle_hls_manifest(
 }
 
 async fn handle_subtitle(
-    State(state): State<ProxyState>,
+    State(state): State<ProxyRouterState>,
     Query(q): Query<SubtitleQuery>,
 ) -> Response {
     if q.url.trim().is_empty() {
@@ -325,7 +398,7 @@ pub fn resolve_stream_content_type(
 
 async fn handle_stream(
     method: Method,
-    state: State<ProxyState>,
+    state: State<ProxyRouterState>,
     headers: HeaderMap,
     q: Query<StreamQuery>,
 ) -> Response {
@@ -334,7 +407,7 @@ async fn handle_stream(
 
 async fn handle_stream_ts(
     method: Method,
-    state: State<ProxyState>,
+    state: State<ProxyRouterState>,
     headers: HeaderMap,
     q: Query<StreamQuery>,
 ) -> Response {
@@ -343,7 +416,7 @@ async fn handle_stream_ts(
 
 async fn handle_stream_mp4(
     method: Method,
-    state: State<ProxyState>,
+    state: State<ProxyRouterState>,
     headers: HeaderMap,
     q: Query<StreamQuery>,
 ) -> Response {
@@ -352,7 +425,7 @@ async fn handle_stream_mp4(
 
 async fn handle_stream_aac(
     method: Method,
-    state: State<ProxyState>,
+    state: State<ProxyRouterState>,
     headers: HeaderMap,
     q: Query<StreamQuery>,
 ) -> Response {
@@ -361,7 +434,7 @@ async fn handle_stream_aac(
 
 async fn handle_stream_vtt(
     method: Method,
-    state: State<ProxyState>,
+    state: State<ProxyRouterState>,
     headers: HeaderMap,
     q: Query<StreamQuery>,
 ) -> Response {
@@ -370,7 +443,7 @@ async fn handle_stream_vtt(
 
 async fn handle_stream_inner(
     method: Method,
-    State(state): State<ProxyState>,
+    State(state): State<ProxyRouterState>,
     headers: HeaderMap,
     Query(q): Query<StreamQuery>,
     mime_hint: Option<&'static str>,
@@ -639,8 +712,9 @@ pub fn rewrite_m3u8(
     base_url: &str,
     video_id: &str,
     client_name: &str,
+    proxy_port: u16,
 ) -> String {
-    let proxy_base = format!("http://{PROXY_HOST}:{PROXY_PORT}");
+    let proxy_base = format!("http://{PROXY_HOST}:{proxy_port}");
     let id_suffix = if video_id.is_empty() {
         String::new()
     } else {
@@ -753,12 +827,13 @@ mod tests {
             "https://manifest.googlevideo.com/api/manifest/hls_variant/index.m3u8",
             "dQw4w9WgXcQ",
             "IOS",
+            8991,
         );
 
-        assert!(out_ios.contains("URI=\"http://127.0.0.1:8989/hls.m3u8?url="));
+        assert!(out_ios.contains("URI=\"http://127.0.0.1:8991/hls.m3u8?url="));
         assert!(out_ios.contains("&client=IOS&id=dQw4w9WgXcQ\""));
-        assert!(out_ios.contains("\nhttp://127.0.0.1:8989/stream.ts?url="));
-        assert!(out_ios.contains("\nhttp://127.0.0.1:8989/stream.aac?url="));
+        assert!(out_ios.contains("\nhttp://127.0.0.1:8991/stream.ts?url="));
+        assert!(out_ios.contains("\nhttp://127.0.0.1:8991/stream.aac?url="));
         assert!(out_ios.contains("&client=IOS&id=dQw4w9WgXcQ"));
 
         let fmp4_variant = "#EXTM3U\n#EXT-X-MAP:URI=\"https://rr1.googlevideo.com/videoplayback/id/123/govp/slices=0-500/gosq/0?is=1&file=seg.ts\"\nhttps://rr1.googlevideo.com/videoplayback/id/123/govp/slices=501-1000/gosq/1/file/seg.ts\n";
@@ -767,10 +842,24 @@ mod tests {
             "https://manifest.googlevideo.com/api/manifest/hls_playlist/index.m3u8",
             "dQw4w9WgXcQ",
             "VISIONOS",
+            8991,
         );
-        assert!(out_vision.contains("URI=\"http://127.0.0.1:8989/stream.mp4?url="));
-        assert!(out_vision.contains("\nhttp://127.0.0.1:8989/stream.mp4?url="));
+        assert!(out_vision.contains("URI=\"http://127.0.0.1:8991/stream.mp4?url="));
+        assert!(out_vision.contains("\nhttp://127.0.0.1:8991/stream.mp4?url="));
         assert!(out_vision.contains("&client=VISIONOS&id=dQw4w9WgXcQ"));
+    }
+
+    #[test]
+    fn bind_proxy_listener_falls_back_when_port_is_busy() {
+        let blocker = std::net::TcpListener::bind((PROXY_HOST, 0)).expect("bind blocker port");
+        let busy_port = blocker.local_addr().unwrap().port();
+
+        let (listener, fallback_port) =
+            bind_proxy_listener_in_range(busy_port, busy_port).expect("fallback should succeed");
+        assert_ne!(fallback_port, 0);
+        assert_ne!(fallback_port, busy_port);
+        drop(listener);
+        drop(blocker);
     }
 
     #[test]

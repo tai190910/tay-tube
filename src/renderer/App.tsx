@@ -7,7 +7,7 @@ import { ShortsScreen } from './components/ShortsScreen.js';
 import { MusicScreen, RepeatMode } from './components/MusicScreen.js';
 import { MusicMiniPlayer } from './components/MusicMiniPlayer.js';
 import { GoogleSignInModal } from './components/GoogleSignInModal.js';
-import { desktopAPI } from './api.js';
+import { desktopAPI, initProxyPort } from './api.js';
 import {
   AuthAccountProfile,
   FavoriteItemUI,
@@ -38,9 +38,12 @@ export const App: React.FC = () => {
   const [authAccount, setAuthAccount] = useState<AuthAccountProfile | null>(null);
   const [showSignInModal, setShowSignInModal] = useState<boolean>(false);
 
-  // Selected Video State
+  // Selected Video & PiP Window State
   const [selectedVideo, setSelectedVideo] = useState<string | null>(null);
   const [initialSeekSec, setInitialSeekSec] = useState<number>(0);
+  const [isPipMode, setIsPipMode] = useState<boolean>(false);
+  const isPipModeRef = useRef<boolean>(false);
+  isPipModeRef.current = isPipMode;
 
   // Explicit Search States + Sequence counter to prevent stale search race conditions
   const [searchInput, setSearchInput] = useState<string>('');
@@ -203,6 +206,7 @@ export const App: React.FC = () => {
 
   // 1. Initial Data & Auth Account Loading (Runs ONCE on mount)
   useEffect(() => {
+    initProxyPort().catch(() => {});
     refreshResumes();
 
     desktopAPI.getFavorites().then((favs: FavoriteItemUI[]) => {
@@ -377,8 +381,47 @@ export const App: React.FC = () => {
   }, []);
 
   // 3. Unified Navigation Controller (Sidebar & Logo clicks)
+  const enterPipMode = useCallback(async () => {
+    if (isPipModeRef.current) return;
+    try {
+      await desktopAPI.enterPipMode();
+      setIsPipMode(true);
+    } catch {
+      // Ignore native window PiP errors
+    }
+  }, []);
+
+  const exitPipMode = useCallback(async () => {
+    if (!isPipModeRef.current) return;
+    setIsPipMode(false);
+    try {
+      await desktopAPI.exitPipMode();
+    } catch {
+      // Ignore native window restore errors
+    }
+  }, []);
+
+  const togglePipMode = useCallback(() => {
+    if (isPipModeRef.current) {
+      exitPipMode();
+    } else {
+      enterPipMode();
+    }
+  }, [enterPipMode, exitPipMode]);
+
+  useEffect(() => {
+    return () => {
+      if (isPipModeRef.current) {
+        desktopAPI.exitPipMode().catch(() => {});
+      }
+    };
+  }, []);
+
   const navigateTo = useCallback(
     (targetView: NavTab) => {
+      if (isPipModeRef.current) {
+        exitPipMode();
+      }
       // Step 1: Synchronously destroy any active video/shorts player
       stopActivePlayer();
 
@@ -435,8 +478,20 @@ export const App: React.FC = () => {
       loadHistory,
       loadWatchLater,
       loadFavorites,
+      exitPipMode,
     ]
   );
+
+  const handleClosePip = useCallback(async () => {
+    stopActivePlayer();
+    await exitPipMode();
+    setSelectedVideo(null);
+    if (searchQuery && searchResults.length > 0) {
+      setActiveView('search');
+    } else {
+      navigateTo(lastBrowseViewRef.current);
+    }
+  }, [stopActivePlayer, exitPipMode, searchQuery, searchResults.length, navigateTo]);
 
   const handleSelectTab = useCallback(
     (tab: NavTab) => {
@@ -646,16 +701,18 @@ export const App: React.FC = () => {
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-yt-bg text-yt-text">
-      {/* Top Header */}
-      <Header
-        searchTerm={searchInput}
-        onSearchTermChange={setSearchInput}
-        onSearch={handleSearch}
-        onGoHome={() => navigateTo('home')}
-        account={authAccount}
-        onOpenSignIn={() => setShowSignInModal(true)}
-        onSignOut={handleSignOut}
-      />
+      {/* Top Header (hidden during PiP while keeping WatchScreen tree intact) */}
+      {!isPipMode && (
+        <Header
+          searchTerm={searchInput}
+          onSearchTermChange={setSearchInput}
+          onSearch={handleSearch}
+          onGoHome={() => navigateTo('home')}
+          account={authAccount}
+          onOpenSignIn={() => setShowSignInModal(true)}
+          onSignOut={handleSignOut}
+        />
+      )}
 
       {/* Hidden Persistent Audio Element for YouTube Music Mode */}
       <audio
@@ -677,13 +734,15 @@ export const App: React.FC = () => {
 
       {/* Main Body */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
-        {/* Sidebar: always accessible (compact rail in watch mode so user can switch tabs anytime) */}
-        <Sidebar
-          activeView={activeView}
-          onSelectTab={handleSelectTab}
-          collapsed={activeView === 'watch' ? true : sidebarCollapsed}
-          onToggleCollapse={() => setSidebarCollapsed((prev) => !prev)}
-        />
+        {/* Sidebar: hidden in PiP mode without shifting main's tree slot */}
+        {!isPipMode && (
+          <Sidebar
+            activeView={activeView}
+            onSelectTab={handleSelectTab}
+            collapsed={activeView === 'watch' ? true : sidebarCollapsed}
+            onToggleCollapse={() => setSidebarCollapsed((prev) => !prev)}
+          />
+        )}
 
         {/* Content Region */}
         <main className="flex-1 h-full overflow-hidden bg-yt-bg relative">
@@ -697,8 +756,15 @@ export const App: React.FC = () => {
               isWatchLater={watchLaterSet.has(selectedVideo)}
               onToggleWatchLater={handleToggleWatchLater}
               onOpenSignIn={() => setShowSignInModal(true)}
+              isPipMode={isPipMode}
+              onTogglePip={togglePipMode}
+              onExitPip={exitPipMode}
+              onClosePip={handleClosePip}
               onBack={() => {
                 stopActivePlayer();
+                if (isPipModeRef.current) {
+                  exitPipMode();
+                }
                 setSelectedVideo(null);
                 if (searchQuery && searchResults.length > 0) {
                   setActiveView('search');
@@ -884,7 +950,7 @@ export const App: React.FC = () => {
       </div>
 
       {/* Persistent Docked Bottom Mini-Player for YouTube Music Mode */}
-      {musicTrack && (
+      {!isPipMode && musicTrack && (
         <MusicMiniPlayer
           track={musicTrack}
           isPlaying={musicPlaying}
@@ -924,11 +990,13 @@ export const App: React.FC = () => {
       )}
 
       {/* Google Device OAuth2 Sign-In Modal */}
-      <GoogleSignInModal
-        isOpen={showSignInModal}
-        onClose={() => setShowSignInModal(false)}
-        onSignedIn={handleSignedIn}
-      />
+      {!isPipMode && (
+        <GoogleSignInModal
+          isOpen={showSignInModal}
+          onClose={() => setShowSignInModal(false)}
+          onSignedIn={handleSignedIn}
+        />
+      )}
     </div>
   );
 };

@@ -312,6 +312,14 @@ pub struct RelatedVideoItem {
     pub thumbnail: String,
     pub duration_text: Option<String>,
     pub view_count_text: Option<String>,
+    pub published_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelatedVideosResult {
+    pub items: Vec<RelatedVideoItem>,
+    pub continuation_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -341,6 +349,7 @@ pub struct TayTubeVideoDetails {
     pub caption_tracks: Vec<CaptionTrackInfo>,
     pub sponsor_segments: Vec<SponsorBlockSegment>,
     pub related_videos: Vec<RelatedVideoItem>,
+    pub related_continuation_token: Option<String>,
     pub proxy_video_url: Option<String>,
     pub proxy_audio_url: Option<String>,
     pub hls_manifest_url: Option<String>,
@@ -465,6 +474,7 @@ struct TrackingSession {
 pub struct YouTubeService {
     http: reqwest::Client,
     auth: Arc<AuthService>,
+    proxy_port: u16,
     visitor_data: RwLock<Option<String>>,
     player_cache: RwLock<HashMap<String, (Instant, Value)>>,
     ios_cache: RwLock<HashMap<String, (Instant, IosStreamingData)>>,
@@ -473,7 +483,7 @@ pub struct YouTubeService {
 }
 
 impl YouTubeService {
-    pub fn new(auth: Arc<AuthService>) -> Result<Self, String> {
+    pub fn new(auth: Arc<AuthService>, proxy_port: u16) -> Result<Self, String> {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(12))
             .timeout(Duration::from_secs(20))
@@ -485,6 +495,7 @@ impl YouTubeService {
         Ok(Self {
             http,
             auth,
+            proxy_port,
             visitor_data: RwLock::new(None),
             player_cache: RwLock::new(HashMap::new()),
             ios_cache: RwLock::new(HashMap::new()),
@@ -1082,19 +1093,38 @@ impl YouTubeService {
         segments
     }
 
-    pub async fn fetch_related_videos(&self, video_id: &str) -> Vec<RelatedVideoItem> {
+    pub async fn fetch_related_videos(&self, video_id: &str) -> RelatedVideosResult {
         let Ok(resp) = self
             .innertube_request("next", json!({ "videoId": video_id }), &CLIENT_WEB)
             .await
         else {
-            return Vec::new();
+            return RelatedVideosResult {
+                items: Vec::new(),
+                continuation_token: None,
+            };
         };
 
-        let mut items = Vec::new();
-        let mut seen = HashSet::new();
-        walk_related(&resp, video_id, &mut items, &mut seen);
-        items.truncate(15);
-        items
+        parse_related_results_from_next(&resp, video_id)
+    }
+
+    pub async fn get_related_videos_continuation(
+        &self,
+        video_id: &str,
+        continuation: &str,
+    ) -> Result<RelatedVideosResult, String> {
+        let token = continuation.trim();
+        if token.is_empty() {
+            return Ok(RelatedVideosResult {
+                items: Vec::new(),
+                continuation_token: None,
+            });
+        }
+
+        let resp = self
+            .innertube_request("next", json!({ "continuation": token }), &CLIENT_WEB)
+            .await?;
+
+        Ok(parse_related_results_from_next(&resp, video_id))
     }
 
     pub async fn get_video_details(
@@ -1109,9 +1139,9 @@ impl YouTubeService {
 
         self.ensure_visitor_data().await;
 
-        let (player_resp, ios_data, sponsor_segments, related_videos) = match extract_mode {
+        let (player_resp, ios_data, sponsor_segments, related_result) = match extract_mode {
             StreamExtractMode::Video => {
-                let (player_res, ios_data, muxed_fallback, sponsor_segments, related_videos) =
+                let (player_res, ios_data, muxed_fallback, sponsor_segments, related_result) =
                     tokio::join!(
                         self.resolve_player_for_mode(&video_id, StreamExtractMode::Video),
                         self.fetch_ios_streaming_data(&video_id),
@@ -1129,10 +1159,10 @@ impl YouTubeService {
                     };
                     merge_streaming_formats(&mut resp, &muxed_extra);
                 }
-                (resp, ios_data, sponsor_segments, related_videos)
+                (resp, ios_data, sponsor_segments, related_result)
             }
             StreamExtractMode::Audio => {
-                let (player_res, sponsor_segments, related_videos) = tokio::join!(
+                let (player_res, sponsor_segments, related_result) = tokio::join!(
                     self.resolve_player_for_mode(&video_id, StreamExtractMode::Audio),
                     self.fetch_sponsor_segments(&video_id),
                     self.fetch_related_videos(&video_id),
@@ -1143,7 +1173,12 @@ impl YouTubeService {
                     let ios_extra = self.fetch_ios_streaming_data(&video_id).await;
                     merge_streaming_formats(&mut resp, &ios_extra);
                 }
-                (resp, IosStreamingData::default(), sponsor_segments, related_videos)
+                (
+                    resp,
+                    IosStreamingData::default(),
+                    sponsor_segments,
+                    related_result,
+                )
             }
         };
 
@@ -1186,14 +1221,15 @@ impl YouTubeService {
             selected.quality_label = "Audio".to_string();
         }
 
-        let caption_tracks = extract_caption_tracks(&player_resp);
+        let caption_tracks = extract_caption_tracks(&player_resp, self.proxy_port);
 
         let chosen_video = selected.video.as_ref().or(selected.muxed.as_ref());
         let proxy_video_url = chosen_video.map(|v| {
             let client = extract_url_client_param(&v.url)
                 .unwrap_or_else(|| CLIENT_VISIONOS.name.to_string());
             format!(
-                "http://127.0.0.1:8989/stream?url={}&client={}&id={}&itag={}",
+                "http://127.0.0.1:{}/stream?url={}&client={}&id={}&itag={}",
+                self.proxy_port,
                 urlencoding::encode(&v.url),
                 urlencoding::encode(&client),
                 urlencoding::encode(&video_id),
@@ -1205,7 +1241,8 @@ impl YouTubeService {
             let client = extract_url_client_param(&a.url)
                 .unwrap_or_else(|| CLIENT_VISIONOS.name.to_string());
             format!(
-                "http://127.0.0.1:8989/stream?url={}&client={}&id={}&itag={}",
+                "http://127.0.0.1:{}/stream?url={}&client={}&id={}&itag={}",
+                self.proxy_port,
                 urlencoding::encode(&a.url),
                 urlencoding::encode(&client),
                 urlencoding::encode(&video_id),
@@ -1231,7 +1268,8 @@ impl YouTubeService {
 
         let proxy_hls_url = raw_hls_url.as_ref().map(|hls| {
             format!(
-                "http://127.0.0.1:8989/hls.m3u8?url={}&client={}&id={}",
+                "http://127.0.0.1:{}/hls.m3u8?url={}&client={}&id={}",
+                self.proxy_port,
                 urlencoding::encode(hls),
                 urlencoding::encode(&hls_client_name),
                 urlencoding::encode(&video_id)
@@ -1320,7 +1358,8 @@ impl YouTubeService {
             all_audio_streams: parsed.audio_only,
             caption_tracks,
             sponsor_segments,
-            related_videos,
+            related_videos: related_result.items,
+            related_continuation_token: related_result.continuation_token,
             proxy_video_url,
             proxy_audio_url,
             hls_manifest_url: raw_hls_url,
@@ -2307,7 +2346,8 @@ impl YouTubeService {
             .unwrap_or_else(|| CLIENT_VISIONOS.name.to_string());
 
         let proxy_audio_url = format!(
-            "http://127.0.0.1:8989/stream?url={}&client={}&id={}&itag={}",
+            "http://127.0.0.1:{}/stream?url={}&client={}&id={}&itag={}",
+            self.proxy_port,
             urlencoding::encode(&raw_url),
             urlencoding::encode(&resolved_client),
             urlencoding::encode(&vid),
@@ -3014,7 +3054,7 @@ fn select_quality(
     }
 }
 
-fn extract_caption_tracks(player_resp: &Value) -> Vec<CaptionTrackInfo> {
+fn extract_caption_tracks(player_resp: &Value, proxy_port: u16) -> Vec<CaptionTrackInfo> {
     let Some(tracks) = player_resp
         .pointer("/captions/playerCaptionsTracklistRenderer/captionTracks")
         .and_then(|v| v.as_array())
@@ -3064,9 +3104,9 @@ fn extract_caption_tracks(player_resp: &Value) -> Vec<CaptionTrackInfo> {
             }
         };
 
-        // Route subtitle fetches through Local Proxy port 8989 so WebView2 avoids CORS issues
+        // Route subtitle fetches through Local Proxy so WebView2 avoids CORS issues
         let vtt_url = format!(
-            "http://127.0.0.1:8989/subtitle?url={}",
+            "http://127.0.0.1:{proxy_port}/subtitle?url={}",
             urlencoding::encode(&raw_vtt_url)
         );
 
@@ -3348,30 +3388,38 @@ fn parse_standard_video_card(v: &Value) -> Option<SearchVideoItem> {
     Some(item)
 }
 
-fn parse_lockup_video(map: &serde_json::Map<String, Value>, val: &Value) -> Option<SearchVideoItem> {
-    if map.get("contentType").and_then(|x| x.as_str()) != Some("LOCKUP_CONTENT_TYPE_VIDEO")
-        || !map.contains_key("lockupViewModel")
-    {
+fn parse_lockup_view_model(lockup: &Value) -> Option<SearchVideoItem> {
+    let content_type = lockup
+        .get("contentType")
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+    if !content_type.is_empty() && content_type != "LOCKUP_CONTENT_TYPE_VIDEO" {
         return None;
     }
-    let id = map.get("contentId").and_then(|x| x.as_str())?.to_string();
-    if !is_valid_video_id(&id) {
-        return None;
-    }
-    let title = val
+
+    let id = lockup
+        .get("contentId")
+        .and_then(|x| x.as_str())
+        .filter(|s| is_valid_video_id(s))
+        .or_else(|| {
+            lockup
+                .pointer("/rendererContext/commandContext/onTap/innertubeCommand/watchEndpoint/videoId")
+                .and_then(|x| x.as_str())
+                .filter(|s| is_valid_video_id(s))
+        })?
+        .to_string();
+
+    let title = lockup
         .pointer("/metadata/lockupMetadataViewModel/title/content")
         .and_then(|s| s.as_str())
         .unwrap_or("")
+        .trim()
         .to_string();
     if title.is_empty() {
         return None;
     }
-    let channel = val
-        .pointer("/metadata/lockupMetadataViewModel/metadata/contentMetadataViewModel/metadataRows/0/metadataParts/0/text/content")
-        .and_then(|s| s.as_str())
-        .unwrap_or("")
-        .to_string();
-    let thumbnail = val
+
+    let thumbnail = lockup
         .pointer("/contentImage/thumbnailViewModel/image/sources")
         .and_then(|v| v.as_array())
         .and_then(|arr| arr.last())
@@ -3380,16 +3428,118 @@ fn parse_lockup_video(map: &serde_json::Map<String, Value>, val: &Value) -> Opti
         .map(normalize_thumb_url)
         .unwrap_or_else(|| format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg"));
 
+    let mut duration_text = String::new();
+    if let Some(overlays) = lockup
+        .pointer("/contentImage/thumbnailViewModel/overlays")
+        .and_then(|v| v.as_array())
+    {
+        'overlay_loop: for ov in overlays {
+            let badge_lists = [
+                ov.pointer("/thumbnailBottomOverlayViewModel/badges"),
+                ov.pointer("/thumbnailOverlayBadgeViewModel/thumbnailBadges"),
+            ];
+            for list_opt in badge_lists {
+                if let Some(badges) = list_opt.and_then(|b| b.as_array()) {
+                    for badge in badges {
+                        if let Some(txt) = badge
+                            .pointer("/thumbnailBadgeViewModel/text")
+                            .and_then(|s| s.as_str())
+                        {
+                            let trimmed = txt.trim();
+                            if !trimmed.is_empty() {
+                                duration_text = trimmed.to_string();
+                                break 'overlay_loop;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let duration_sec = parse_duration_to_sec(&duration_text);
+
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    if let Some(raw_rows) = lockup
+        .pointer("/metadata/lockupMetadataViewModel/metadata/contentMetadataViewModel/metadataRows")
+        .and_then(|v| v.as_array())
+    {
+        for row in raw_rows {
+            let Some(parts) = row.get("metadataParts").and_then(|p| p.as_array()) else {
+                continue;
+            };
+            let mut row_parts: Vec<String> = Vec::new();
+            for part in parts {
+                let text = part
+                    .pointer("/text/content")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .replace('\u{00a0}', " ")
+                    .trim()
+                    .to_string();
+                let leading_icon = part
+                    .pointer("/leadingIcon/name")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("");
+                let chosen = if leading_icon == "PLAY_ARROW_OUTLINED"
+                    && !text.to_lowercase().contains("lượt xem")
+                    && !text.to_lowercase().contains("view")
+                    && !text.to_lowercase().contains("xem")
+                {
+                    part.get("accessibilityLabel")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.replace('\u{00a0}', " ").trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(text)
+                } else {
+                    text
+                };
+                if !chosen.is_empty() {
+                    row_parts.push(chosen);
+                }
+            }
+            if !row_parts.is_empty() {
+                rows.push(row_parts);
+            }
+        }
+    }
+
+    let (channel, view_count_text, published_text) = if rows.len() >= 2 {
+        let ch = rows[0].join(" • ");
+        let vc = rows[1].first().cloned().unwrap_or_default();
+        let pub_t = if rows[1].len() > 1 {
+            Some(rows[1][1..].join(" • "))
+        } else {
+            None
+        };
+        (ch, vc, pub_t)
+    } else if rows.len() == 1 {
+        let ch = rows[0].first().cloned().unwrap_or_default();
+        let vc = rows[0].get(1).cloned().unwrap_or_default();
+        let pub_t = if rows[0].len() > 2 {
+            Some(rows[0][2..].join(" • "))
+        } else {
+            None
+        };
+        (ch, vc, pub_t)
+    } else {
+        (String::new(), String::new(), None)
+    };
+
+    let channel_id = lockup
+        .pointer("/metadata/lockupMetadataViewModel/image/decoratedAvatarViewModel/rendererContext/commandContext/onTap/innertubeCommand/browseEndpoint/browseId")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string());
+
     Some(SearchVideoItem {
         id,
         title,
         channel,
-        channel_id: None,
+        channel_id,
         thumbnail,
-        duration_text: String::new(),
-        duration_sec: 0,
-        view_count_text: String::new(),
-        published_text: None,
+        duration_text,
+        duration_sec,
+        view_count_text,
+        published_text,
         percent_watched: None,
     })
 }
@@ -3435,9 +3585,11 @@ fn walk_browse_videos(val: &Value, list: &mut Vec<SearchVideoItem>, seen: &mut H
                 }
             }
 
-            if let Some(item) = parse_lockup_video(map, val) {
-                if seen.insert(item.id.clone()) {
-                    list.push(item);
+            if let Some(lockup) = map.get("lockupViewModel") {
+                if let Some(item) = parse_lockup_view_model(lockup) {
+                    if seen.insert(item.id.clone()) {
+                        list.push(item);
+                    }
                 }
                 return;
             }
@@ -3478,92 +3630,243 @@ fn walk_trending(val: &Value, list: &mut Vec<SearchVideoItem>, seen: &mut HashSe
     }
 }
 
-fn walk_related(
+fn search_item_to_related(item: SearchVideoItem) -> RelatedVideoItem {
+    RelatedVideoItem {
+        id: item.id,
+        title: item.title,
+        channel: item.channel,
+        thumbnail: item.thumbnail,
+        duration_text: (!item.duration_text.is_empty()).then_some(item.duration_text),
+        view_count_text: (!item.view_count_text.is_empty()).then_some(item.view_count_text),
+        published_text: item.published_text.filter(|s| !s.is_empty()),
+    }
+}
+
+fn parse_compact_video_related(v: &Value) -> Option<RelatedVideoItem> {
+    let id = v.get("videoId").and_then(|x| x.as_str())?.to_string();
+    if !is_valid_video_id(&id) {
+        return None;
+    }
+
+    let title = extract_runs_or_simple(v.get("title")).trim().to_string();
+    if title.is_empty() {
+        return None;
+    }
+
+    let mut channel = extract_runs_or_simple(v.get("shortBylineText"));
+    if channel.is_empty() {
+        channel = extract_runs_or_simple(v.get("longBylineText"));
+    }
+    if channel.is_empty() {
+        channel = extract_runs_or_simple(v.get("ownerText"));
+    }
+
+    let thumbnail = v
+        .pointer("/thumbnail/thumbnails")
+        .and_then(|arr| arr.as_array())
+        .and_then(|arr| arr.last())
+        .and_then(|t| t.get("url"))
+        .and_then(|s| s.as_str())
+        .map(normalize_thumb_url)
+        .unwrap_or_else(|| format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg"));
+
+    let mut duration_text = extract_runs_or_simple(v.get("lengthText"))
+        .trim()
+        .to_string();
+    if duration_text.is_empty() {
+        if let Some(overlays) = v.get("thumbnailOverlays").and_then(|o| o.as_array()) {
+            for ov in overlays {
+                if let Some(ts) = ov.pointer("/thumbnailOverlayTimeStatusRenderer/text") {
+                    let txt = extract_runs_or_simple(Some(ts)).trim().to_string();
+                    if !txt.is_empty() {
+                        duration_text = txt;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut view_count_text = extract_runs_or_simple(v.get("viewCountText"))
+        .trim()
+        .to_string();
+    if view_count_text.is_empty() {
+        view_count_text = extract_runs_or_simple(v.get("shortViewCountText"))
+            .trim()
+            .to_string();
+    }
+
+    let published_text = Some(extract_runs_or_simple(v.get("publishedTimeText")))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    Some(RelatedVideoItem {
+        id,
+        title,
+        channel,
+        thumbnail,
+        duration_text: (!duration_text.is_empty()).then_some(duration_text),
+        view_count_text: (!view_count_text.is_empty()).then_some(view_count_text),
+        published_text,
+    })
+}
+
+fn parse_related_item_node(node: &Value) -> Option<RelatedVideoItem> {
+    if let Some(rich_content) = node.pointer("/richItemRenderer/content") {
+        return parse_related_item_node(rich_content);
+    }
+    if let Some(lockup) = node.get("lockupViewModel") {
+        return parse_lockup_view_model(lockup).map(search_item_to_related);
+    }
+    if let Some(cv) = node.get("compactVideoRenderer") {
+        return parse_compact_video_related(cv);
+    }
+    for key in ["videoRenderer", "gridVideoRenderer", "playlistVideoRenderer"] {
+        if let Some(vr) = node.get(key) {
+            return parse_standard_video_card(vr).map(search_item_to_related);
+        }
+    }
+    None
+}
+
+fn extract_related_continuation_token(node: &Value) -> Option<String> {
+    let cont = node.get("continuationItemRenderer")?;
+    cont.pointer("/continuationEndpoint/continuationCommand/token")
+        .or_else(|| cont.pointer("/button/buttonRenderer/command/continuationCommand/token"))
+        .or_else(|| {
+            cont.pointer("/button/buttonRenderer/navigationEndpoint/continuationCommand/token")
+        })
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn collect_related_from_slice(
+    nodes: &[Value],
+    current_video_id: &str,
+    items: &mut Vec<RelatedVideoItem>,
+    seen: &mut HashSet<String>,
+    continuation_token: &mut Option<String>,
+) {
+    for node in nodes {
+        if let Some(tok) = extract_related_continuation_token(node) {
+            if continuation_token.is_none() {
+                *continuation_token = Some(tok);
+            }
+            continue;
+        }
+        if let Some(sec_items) = node
+            .pointer("/itemSectionRenderer/contents")
+            .and_then(|v| v.as_array())
+        {
+            collect_related_from_slice(
+                sec_items,
+                current_video_id,
+                items,
+                seen,
+                continuation_token,
+            );
+            continue;
+        }
+        if let Some(item) = parse_related_item_node(node) {
+            if item.id != current_video_id && seen.insert(item.id.clone()) {
+                items.push(item);
+            }
+        }
+    }
+}
+
+fn walk_secondary_subtree(
     val: &Value,
     current_video_id: &str,
     items: &mut Vec<RelatedVideoItem>,
     seen: &mut HashSet<String>,
+    continuation_token: &mut Option<String>,
 ) {
-    if items.len() >= 20 {
-        return;
-    }
     match val {
         Value::Object(map) => {
-            if let Some(v) = map.get("compactVideoRenderer") {
-                if let Some(vid) = v.get("videoId").and_then(|x| x.as_str()) {
-                    if vid != current_video_id && seen.insert(vid.to_string()) {
-                        let title = extract_runs_or_simple(v.get("title"));
-                        if !title.is_empty() {
-                            let channel = extract_runs_or_simple(v.get("shortBylineText"));
-                            let thumbnail = v
-                                .pointer("/thumbnail/thumbnails/0/url")
-                                .and_then(|s| s.as_str())
-                                .map(|s| s.to_string())
-                                .unwrap_or_else(|| format!("https://i.ytimg.com/vi/{vid}/hqdefault.jpg"));
-                            let duration_text = v
-                                .pointer("/lengthText/simpleText")
-                                .and_then(|s| s.as_str())
-                                .map(|s| s.to_string());
-                            let view_count_text = v
-                                .pointer("/viewCountText/simpleText")
-                                .and_then(|s| s.as_str())
-                                .map(|s| s.to_string());
-
-                            items.push(RelatedVideoItem {
-                                id: vid.to_string(),
-                                title,
-                                channel,
-                                thumbnail,
-                                duration_text,
-                                view_count_text,
-                            });
-                        }
-                    }
+            if let Some(tok) = extract_related_continuation_token(val) {
+                if continuation_token.is_none() {
+                    *continuation_token = Some(tok);
                 }
-            } else if map.get("contentType").and_then(|x| x.as_str()) == Some("LOCKUP_CONTENT_TYPE_VIDEO")
-                && map.contains_key("lockupViewModel")
-            {
-                if let Some(vid) = map.get("contentId").and_then(|x| x.as_str()) {
-                    if vid != current_video_id && seen.insert(vid.to_string()) {
-                        let title = val
-                            .pointer("/metadata/lockupMetadataViewModel/title/content")
-                            .and_then(|s| s.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        if !title.is_empty() {
-                            let channel = val
-                                .pointer("/metadata/lockupMetadataViewModel/metadata/contentMetadataViewModel/metadataRows/0/metadataParts/0/text/content")
-                                .and_then(|s| s.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let thumbnail = val
-                                .pointer("/contentImage/thumbnailViewModel/image/sources/0/url")
-                                .and_then(|s| s.as_str())
-                                .map(|s| s.to_string())
-                                .unwrap_or_else(|| format!("https://i.ytimg.com/vi/{vid}/hqdefault.jpg"));
-                            items.push(RelatedVideoItem {
-                                id: vid.to_string(),
-                                title,
-                                channel,
-                                thumbnail,
-                                duration_text: None,
-                                view_count_text: None,
-                            });
-                        }
-                    }
-                }
+                return;
             }
-
+            if map.get("reelShelfRenderer").is_some() {
+                return;
+            }
+            if let Some(item) = parse_related_item_node(val) {
+                if item.id != current_video_id && seen.insert(item.id.clone()) {
+                    items.push(item);
+                }
+                return;
+            }
             for child in map.values() {
-                walk_related(child, current_video_id, items, seen);
+                walk_secondary_subtree(child, current_video_id, items, seen, continuation_token);
             }
         }
         Value::Array(arr) => {
             for child in arr {
-                walk_related(child, current_video_id, items, seen);
+                walk_secondary_subtree(child, current_video_id, items, seen, continuation_token);
             }
         }
         _ => {}
+    }
+}
+
+pub fn parse_related_results_from_next(resp: &Value, current_video_id: &str) -> RelatedVideosResult {
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+    let mut continuation_token: Option<String> = None;
+
+    if let Some(results) = resp
+        .pointer("/contents/twoColumnWatchNextResults/secondaryResults/secondaryResults/results")
+        .and_then(|v| v.as_array())
+    {
+        collect_related_from_slice(
+            results,
+            current_video_id,
+            &mut items,
+            &mut seen,
+            &mut continuation_token,
+        );
+    }
+
+    if let Some(endpoints) = resp
+        .get("onResponseReceivedEndpoints")
+        .and_then(|v| v.as_array())
+    {
+        for ep in endpoints {
+            if let Some(cont_items) = ep
+                .pointer("/appendContinuationItemsAction/continuationItems")
+                .and_then(|v| v.as_array())
+            {
+                collect_related_from_slice(
+                    cont_items,
+                    current_video_id,
+                    &mut items,
+                    &mut seen,
+                    &mut continuation_token,
+                );
+            }
+        }
+    }
+
+    if items.is_empty() {
+        if let Some(sec_root) = resp.pointer("/contents/twoColumnWatchNextResults/secondaryResults")
+        {
+            walk_secondary_subtree(
+                sec_root,
+                current_video_id,
+                &mut items,
+                &mut seen,
+                &mut continuation_token,
+            );
+        }
+    }
+
+    RelatedVideosResult {
+        items,
+        continuation_token,
     }
 }
 
@@ -4671,5 +4974,194 @@ mod tests {
             &hls_resp,
             StreamExtractMode::Video
         ));
+    }
+
+    #[test]
+    fn parse_related_results_extracts_lockup_compact_rich_and_continuation() {
+        let next_payload = json!({
+            "contents": {
+                "twoColumnWatchNextResults": {
+                    "secondaryResults": {
+                        "secondaryResults": {
+                            "results": [
+                                {
+                                    "lockupViewModel": {
+                                        "contentId": "dQw4w9WgXcQ",
+                                        "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                                        "metadata": {
+                                            "lockupMetadataViewModel": {
+                                                "title": { "content": "Same video should be skipped" }
+                                            }
+                                        }
+                                    }
+                                },
+                                {
+                                    "lockupViewModel": {
+                                        "contentId": "VAUlkygT2eQ",
+                                        "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                                        "contentImage": {
+                                            "thumbnailViewModel": {
+                                                "image": {
+                                                    "sources": [
+                                                        { "url": "https://i.ytimg.com/vi/VAUlkygT2eQ/hq1.jpg", "width": 168, "height": 94 },
+                                                        { "url": "https://i.ytimg.com/vi/VAUlkygT2eQ/hq2.jpg", "width": 336, "height": 188 }
+                                                    ]
+                                                },
+                                                "overlays": [
+                                                    {
+                                                        "thumbnailBottomOverlayViewModel": {
+                                                            "badges": [
+                                                                { "thumbnailBadgeViewModel": { "text": "21:01" } }
+                                                            ]
+                                                        }
+                                                    }
+                                                ]
+                                            }
+                                        },
+                                        "metadata": {
+                                            "lockupMetadataViewModel": {
+                                                "title": { "content": "Truyen Roblox Hay Nhat" },
+                                                "metadata": {
+                                                    "contentMetadataViewModel": {
+                                                        "metadataRows": [
+                                                            {
+                                                                "metadataParts": [
+                                                                    { "text": { "content": "Teo Roblox" } }
+                                                                ]
+                                                            },
+                                                            {
+                                                                "metadataParts": [
+                                                                    {
+                                                                        "text": { "content": "12\u{00a0}N" },
+                                                                        "accessibilityLabel": "12 nghin luot xem",
+                                                                        "leadingIcon": { "name": "PLAY_ARROW_OUTLINED" }
+                                                                    },
+                                                                    {
+                                                                        "text": { "content": "2 gio truoc" }
+                                                                    }
+                                                                ]
+                                                            }
+                                                        ]
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                {
+                                    "compactVideoRenderer": {
+                                        "videoId": "qHpE45b4INk",
+                                        "title": { "simpleText": "Classic Compact Video" },
+                                        "shortBylineText": { "runs": [{ "text": "Compact Channel" }] },
+                                        "lengthText": { "simpleText": "4:09" },
+                                        "viewCountText": { "simpleText": "1,2 Tr luot xem" },
+                                        "publishedTimeText": { "simpleText": "1 nam truoc" },
+                                        "thumbnail": {
+                                            "thumbnails": [
+                                                { "url": "//i.ytimg.com/vi/qHpE45b4INk/mqdefault.jpg" }
+                                            ]
+                                        }
+                                    }
+                                },
+                                {
+                                    "richItemRenderer": {
+                                        "content": {
+                                            "videoRenderer": {
+                                                "videoId": "9bZkp7q19f0",
+                                                "title": { "runs": [{ "text": "Rich Item Video" }] },
+                                                "ownerText": { "runs": [{ "text": "Rich Channel" }] },
+                                                "lengthText": { "simpleText": "4:13" },
+                                                "viewCountText": { "simpleText": "5 Ty luot xem" },
+                                                "publishedTimeText": { "simpleText": "10 nam truoc" }
+                                            }
+                                        }
+                                    }
+                                },
+                                {
+                                    "continuationItemRenderer": {
+                                        "continuationEndpoint": {
+                                            "continuationCommand": { "token": "CONT_TOKEN_WATCH_NEXT_1" }
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        });
+
+        let parsed = parse_related_results_from_next(&next_payload, "dQw4w9WgXcQ");
+        assert_eq!(parsed.items.len(), 3);
+        assert_eq!(
+            parsed.continuation_token.as_deref(),
+            Some("CONT_TOKEN_WATCH_NEXT_1")
+        );
+
+        let first = &parsed.items[0];
+        assert_eq!(first.id, "VAUlkygT2eQ");
+        assert_eq!(first.title, "Truyen Roblox Hay Nhat");
+        assert_eq!(first.channel, "Teo Roblox");
+        assert_eq!(first.thumbnail, "https://i.ytimg.com/vi/VAUlkygT2eQ/hq2.jpg");
+        assert_eq!(first.duration_text.as_deref(), Some("21:01"));
+        assert_eq!(first.view_count_text.as_deref(), Some("12 nghin luot xem"));
+        assert_eq!(first.published_text.as_deref(), Some("2 gio truoc"));
+
+        let second = &parsed.items[1];
+        assert_eq!(second.id, "qHpE45b4INk");
+        assert_eq!(
+            second.thumbnail,
+            "https://i.ytimg.com/vi/qHpE45b4INk/mqdefault.jpg"
+        );
+        assert_eq!(second.duration_text.as_deref(), Some("4:09"));
+        assert_eq!(second.published_text.as_deref(), Some("1 nam truoc"));
+
+        let third = &parsed.items[2];
+        assert_eq!(third.id, "9bZkp7q19f0");
+        assert_eq!(third.channel, "Rich Channel");
+    }
+
+    #[test]
+    fn parse_related_results_extracts_continuation_payload() {
+        let cont_payload = json!({
+            "onResponseReceivedEndpoints": [
+                {
+                    "appendContinuationItemsAction": {
+                        "continuationItems": [
+                            {
+                                "lockupViewModel": {
+                                    "contentId": "jNQXAC9IVRw",
+                                    "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                                    "metadata": {
+                                        "lockupMetadataViewModel": {
+                                            "title": { "content": "Me at the zoo" }
+                                        }
+                                    }
+                                }
+                            },
+                            {
+                                "continuationItemRenderer": {
+                                    "button": {
+                                        "buttonRenderer": {
+                                            "command": {
+                                                "continuationCommand": { "token": "CONT_TOKEN_NEXT_2" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        });
+
+        let parsed = parse_related_results_from_next(&cont_payload, "dQw4w9WgXcQ");
+        assert_eq!(parsed.items.len(), 1);
+        assert_eq!(parsed.items[0].id, "jNQXAC9IVRw");
+        assert_eq!(
+            parsed.continuation_token.as_deref(),
+            Some("CONT_TOKEN_NEXT_2")
+        );
     }
 }

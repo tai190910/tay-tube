@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   Heart,
   Clock,
@@ -7,11 +7,17 @@ import {
   ChevronUp,
   ArrowLeft,
 } from 'lucide-react';
-import { AvSyncPlayer } from './AvSyncPlayer.js';
+import { AvSyncPlayer, PlayerSeekController } from './AvSyncPlayer.js';
 import { CommentsList } from './CommentsList.js';
 import { desktopAPI } from '../api.js';
 import {
+  tokenizeDescriptionLine,
+  extractChaptersFromDescription,
+  extractYouTubeLinkTarget,
+} from '../utils/descriptionParser.js';
+import {
   CommentUI,
+  RelatedVideoItem,
   TayTubeVideoDetails,
   VideoItemUI,
 } from '../types.js';
@@ -26,6 +32,10 @@ interface WatchScreenProps {
   isWatchLater?: boolean;
   onToggleWatchLater?: (item: VideoItemUI) => Promise<void> | void;
   onOpenSignIn?: () => void;
+  isPipMode?: boolean;
+  onTogglePip?: () => void;
+  onExitPip?: () => void;
+  onClosePip?: () => void;
 }
 
 export const WatchScreen: React.FC<WatchScreenProps> = ({
@@ -38,6 +48,10 @@ export const WatchScreen: React.FC<WatchScreenProps> = ({
   isWatchLater = false,
   onToggleWatchLater,
   onOpenSignIn,
+  isPipMode = false,
+  onTogglePip,
+  onExitPip,
+  onClosePip,
 }) => {
   const [details, setDetails] = useState<TayTubeVideoDetails | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -60,12 +74,32 @@ export const WatchScreen: React.FC<WatchScreenProps> = ({
   const [commentsCount, setCommentsCount] = useState<number>(0);
   const [commentsLoading, setCommentsLoading] = useState<boolean>(false);
 
+  // Related videos + infinite continuation state
+  const [relatedVideos, setRelatedVideos] = useState<RelatedVideoItem[]>([]);
+  const [relatedContinuation, setRelatedContinuation] = useState<string | null>(null);
+  const [loadingMoreRelated, setLoadingMoreRelated] = useState<boolean>(false);
+  const loadingMoreRelatedRef = useRef<boolean>(false);
+  const activeVideoIdRef = useRef<string>(videoId);
+  activeVideoIdRef.current = videoId;
+
+  // Scroll, infinite-load sentinel, and player seek controller refs
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const relatedSentinelRef = useRef<HTMLDivElement | null>(null);
+  const seekControllerRef = useRef<PlayerSeekController | null>(null);
+  const registerSeekController = useCallback((controller: PlayerSeekController | null) => {
+    seekControllerRef.current = controller;
+  }, []);
+
   // 1. Fetch Video Details & Stream URLs
   useEffect(() => {
     let isCancelled = false;
     setLoading(true);
     setError(null);
     setDetails(null);
+    setRelatedVideos([]);
+    setRelatedContinuation(null);
+    setLoadingMoreRelated(false);
+    loadingMoreRelatedRef.current = false;
 
     // Check favorite status
     desktopAPI
@@ -80,6 +114,8 @@ export const WatchScreen: React.FC<WatchScreenProps> = ({
       .then((data: TayTubeVideoDetails) => {
         if (!isCancelled) {
           setDetails(data);
+          setRelatedVideos(data.relatedVideos || []);
+          setRelatedContinuation(data.relatedContinuationToken || null);
           setLoading(false);
 
           // Save to Watch History immediately on view
@@ -103,6 +139,91 @@ export const WatchScreen: React.FC<WatchScreenProps> = ({
       isCancelled = true;
     };
   }, [videoId]);
+
+  const loadMoreRelated = useCallback(async () => {
+    const token = relatedContinuation;
+    if (!token || loadingMoreRelatedRef.current) return;
+    const reqVideoId = activeVideoIdRef.current;
+    loadingMoreRelatedRef.current = true;
+    setLoadingMoreRelated(true);
+
+    try {
+      const res = await desktopAPI.getRelatedVideosContinuation(reqVideoId, token);
+      if (activeVideoIdRef.current !== reqVideoId) return;
+      setRelatedVideos((prev) => {
+        const seen = new Set(prev.map((v) => v.id));
+        const merged = [...prev];
+        for (const item of res.items || []) {
+          if (item.id !== reqVideoId && !seen.has(item.id)) {
+            seen.add(item.id);
+            merged.push(item);
+          }
+        }
+        return merged;
+      });
+      setRelatedContinuation(res.continuationToken || null);
+    } catch {
+      // Preserve existing items so user can retry
+    } finally {
+      if (activeVideoIdRef.current === reqVideoId) {
+        loadingMoreRelatedRef.current = false;
+        setLoadingMoreRelated(false);
+      }
+    }
+  }, [relatedContinuation]);
+
+  useEffect(() => {
+    if (activeTab !== 'related' || isPipMode || !relatedContinuation) return;
+    const sentinel = relatedSentinelRef.current;
+    const root = scrollContainerRef.current;
+    if (!sentinel || !root || typeof IntersectionObserver === 'undefined') return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          loadMoreRelated();
+        }
+      },
+      { root, rootMargin: '240px 0px' }
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [activeTab, isPipMode, relatedContinuation, relatedVideos.length, loadMoreRelated]);
+
+  const chapters = useMemo(
+    () => extractChaptersFromDescription(details?.description || '', details?.durationSec),
+    [details?.description, details?.durationSec]
+  );
+
+  const descriptionLines = useMemo(() => {
+    if (!details?.description) return [];
+    return details.description
+      .split(/\r?\n/)
+      .map((line) => tokenizeDescriptionLine(line, details.durationSec));
+  }, [details?.description, details?.durationSec]);
+
+  const handleTimestampClick = useCallback((seconds: number) => {
+    seekControllerRef.current?.seekAndPlay(seconds);
+    if (scrollContainerRef.current && scrollContainerRef.current.scrollTop > 40) {
+      scrollContainerRef.current.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }, []);
+
+  const handleDescriptionLinkClick = useCallback(
+    (href: string) => {
+      const ytTarget = extractYouTubeLinkTarget(href);
+      if (ytTarget) {
+        if (ytTarget.videoId === videoId && ytTarget.startSec !== undefined) {
+          handleTimestampClick(ytTarget.startSec);
+        } else {
+          onSelectRelated(ytTarget.videoId);
+        }
+        return;
+      }
+      desktopAPI.openExternalUrl(href).catch(() => {});
+    },
+    [videoId, handleTimestampClick, onSelectRelated]
+  );
 
   // 2. Fetch comments when Comments tab is selected or video loads
   useEffect(() => {
@@ -233,22 +354,43 @@ export const WatchScreen: React.FC<WatchScreenProps> = ({
   }
 
   return (
-    <div className="h-full w-full overflow-y-auto p-4 lg:p-5 space-y-4">
+    <div
+      ref={scrollContainerRef}
+      className={
+        isPipMode
+          ? 'h-full w-full overflow-hidden p-0'
+          : 'h-full w-full overflow-y-auto p-4 lg:p-5 space-y-4'
+      }
+    >
       {/* Back button */}
-      <button
-        type="button"
-        onClick={onBack}
-        className="flex items-center space-x-2 text-yt-subtext hover:text-white text-xs font-semibold px-2.5 py-1.5 rounded-[8px] bg-yt-card hover:bg-yt-hover border border-white/[0.05] transition-colors duration-150 w-fit"
-      >
-        <ArrowLeft className="w-4 h-4" />
-        <span>Quay lại</span>
-      </button>
+      {!isPipMode && (
+        <button
+          type="button"
+          onClick={onBack}
+          className="flex items-center space-x-2 text-yt-subtext hover:text-white text-xs font-semibold px-2.5 py-1.5 rounded-[8px] bg-yt-card hover:bg-yt-hover border border-white/[0.05] transition-colors duration-150 w-fit"
+        >
+          <ArrowLeft className="w-4 h-4" />
+          <span>Quay lại</span>
+        </button>
+      )}
 
-      {/* Main Layout: Theater Mode or Two-Column */}
-      <div className={`flex flex-col ${isTheater ? 'space-y-5' : 'lg:flex-row lg:space-x-5 lg:space-y-0'}`}>
+      {/* Main Layout: PiP Fullscreen Canvas, Theater Mode, or Two-Column */}
+      <div
+        className={
+          isPipMode
+            ? 'h-full w-full flex flex-col'
+            : `flex flex-col ${isTheater ? 'space-y-5' : 'lg:flex-row lg:space-x-5 lg:space-y-0'}`
+        }
+      >
         {/* Left / Main Player Column */}
-        <div className={`flex-1 flex flex-col space-y-4 ${isTheater ? 'w-full' : 'lg:w-[70%]'}`}>
-          {/* Custom AvSync Player */}
+        <div
+          className={
+            isPipMode
+              ? 'h-full w-full flex flex-col'
+              : `flex-1 flex flex-col space-y-4 ${isTheater ? 'w-full' : 'lg:w-[70%]'}`
+          }
+        >
+          {/* Custom AvSync Player (kept at fixed tree slot for zero-reload PiP transitions) */}
           <AvSyncPlayer
             details={details}
             initialPositionSec={initialPositionSec}
@@ -256,165 +398,256 @@ export const WatchScreen: React.FC<WatchScreenProps> = ({
             isTheater={isTheater}
             onToggleTheater={() => setIsTheater((prev) => !prev)}
             onRegisterCleanup={onRegisterCleanup}
+            isPipMode={isPipMode}
+            onTogglePip={onTogglePip}
+            onExitPip={onExitPip}
+            onClosePip={onClosePip}
+            chapters={chapters}
+            onRegisterSeekController={registerSeekController}
           />
 
           {/* Video Metadata Header */}
-          <div className="flex flex-col space-y-3">
-            <h1 className="text-base md:text-lg font-bold text-white leading-snug">
-              {details.title}
-            </h1>
+          {!isPipMode && (
+            <div className="flex flex-col space-y-3">
+              <h1 className="text-base md:text-lg font-bold text-white leading-snug">
+                {details.title}
+              </h1>
 
-            {/* Author info & Actions Row */}
-            <div className="flex flex-wrap items-center justify-between gap-4 pb-3 border-b border-yt-border">
-              {/* Channel */}
-              <div className="flex items-center space-x-3">
-                <div className="w-9 h-9 rounded-[8px] bg-yt-hover border border-white/10 flex items-center justify-center font-bold text-sm text-white">
-                  {details.channel.charAt(0).toUpperCase()}
+              {/* Author info & Actions Row */}
+              <div className="flex flex-wrap items-center justify-between gap-4 pb-3 border-b border-yt-border">
+                {/* Channel */}
+                <div className="flex items-center space-x-3">
+                  <div className="w-9 h-9 rounded-[8px] bg-yt-hover border border-white/10 flex items-center justify-center font-bold text-sm text-white">
+                    {details.channel.charAt(0).toUpperCase()}
+                  </div>
+                  <div>
+                    <h3 className="font-semibold text-sm text-white hover:text-yt-red transition-colors">
+                      {details.channel}
+                    </h3>
+                    <p className="text-xs text-yt-subtext">
+                      {parseInt(details.viewCount, 10).toLocaleString()} lượt xem
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <h3 className="font-semibold text-sm text-white hover:text-yt-red transition-colors">
-                    {details.channel}
-                  </h3>
-                  <p className="text-xs text-yt-subtext">
-                    {parseInt(details.viewCount, 10).toLocaleString()} lượt xem
-                  </p>
+
+                {/* Action Buttons */}
+                <div className="flex items-center space-x-2">
+                  {/* Watch Later Button */}
+                  <button
+                    type="button"
+                    onClick={handleWatchLaterClick}
+                    className={`flex items-center space-x-1.5 px-3.5 py-2 rounded-[8px] text-xs font-semibold border transition-colors duration-150 ${
+                      isSignedIn && isWatchLater
+                        ? 'bg-emerald-600 text-white border-emerald-500'
+                        : 'bg-yt-card hover:bg-yt-hover text-yt-text border-white/[0.07]'
+                    }`}
+                    title={
+                      isSignedIn
+                        ? isWatchLater
+                          ? 'Xóa khỏi Xem sau trên tài khoản Google'
+                          : 'Thêm vào Xem sau trên tài khoản Google'
+                        : 'Đăng nhập Google để lưu vào Xem sau'
+                    }
+                  >
+                    {isSignedIn && isWatchLater ? (
+                      <Check className="w-4 h-4" />
+                    ) : (
+                      <Clock className="w-4 h-4" />
+                    )}
+                    <span>{isSignedIn && isWatchLater ? 'Đã thêm Xem sau' : 'Xem sau'}</span>
+                  </button>
+
+                  {/* Favorite Button */}
+                  <button
+                    type="button"
+                    onClick={handleToggleFavorite}
+                    className={`flex items-center space-x-1.5 px-3.5 py-2 rounded-[8px] text-xs font-semibold border transition-colors duration-150 ${
+                      isFavorite
+                        ? 'bg-yt-red text-white border-yt-red'
+                        : 'bg-yt-card hover:bg-yt-hover text-yt-text border-white/[0.07]'
+                    }`}
+                  >
+                    <Heart className={`w-4 h-4 ${isFavorite ? 'fill-current' : ''}`} />
+                    <span>{isFavorite ? 'Đã thích' : 'Yêu thích'}</span>
+                  </button>
                 </div>
               </div>
 
-              {/* Action Buttons */}
-              <div className="flex items-center space-x-2">
-                {/* Watch Later Button */}
-                <button
-                  type="button"
-                  onClick={handleWatchLaterClick}
-                  className={`flex items-center space-x-1.5 px-3.5 py-2 rounded-[8px] text-xs font-semibold border transition-colors duration-150 ${
-                    isSignedIn && isWatchLater
-                      ? 'bg-emerald-600 text-white border-emerald-500'
-                      : 'bg-yt-card hover:bg-yt-hover text-yt-text border-white/[0.07]'
-                  }`}
-                  title={
-                    isSignedIn
-                      ? isWatchLater
-                        ? 'Xóa khỏi Xem sau trên tài khoản Google'
-                        : 'Thêm vào Xem sau trên tài khoản Google'
-                      : 'Đăng nhập Google để lưu vào Xem sau'
-                  }
-                >
-                  {isSignedIn && isWatchLater ? (
-                    <Check className="w-4 h-4" />
-                  ) : (
-                    <Clock className="w-4 h-4" />
-                  )}
-                  <span>{isSignedIn && isWatchLater ? 'Đã thêm Xem sau' : 'Xem sau'}</span>
-                </button>
-
-                {/* Favorite Button */}
-                <button
-                  type="button"
-                  onClick={handleToggleFavorite}
-                  className={`flex items-center space-x-1.5 px-3.5 py-2 rounded-[8px] text-xs font-semibold border transition-colors duration-150 ${
-                    isFavorite
-                      ? 'bg-yt-red text-white border-yt-red'
-                      : 'bg-yt-card hover:bg-yt-hover text-yt-text border-white/[0.07]'
+              {/* Expandable Description with Interactive Timestamps, URLs & Chapters */}
+              {details.description && (
+                <div
+                  onClick={() => {
+                    if (!isDescExpanded) setIsDescExpanded(true);
+                  }}
+                  className={`bg-yt-card p-3.5 rounded-[8px] border border-white/[0.05] transition-colors duration-150 text-xs text-yt-text leading-relaxed select-text ${
+                    !isDescExpanded ? 'hover:bg-yt-hover cursor-pointer' : ''
                   }`}
                 >
-                  <Heart className={`w-4 h-4 ${isFavorite ? 'fill-current' : ''}`} />
-                  <span>{isFavorite ? 'Đã thích' : 'Yêu thích'}</span>
-                </button>
-              </div>
+                  <div
+                    className={
+                      isDescExpanded
+                        ? 'whitespace-pre-wrap break-words'
+                        : 'line-clamp-3 whitespace-pre-wrap break-words'
+                    }
+                  >
+                    {descriptionLines.map((tokens, lineIdx) => (
+                      <React.Fragment key={`desc-line-${lineIdx}`}>
+                        {tokens.map((tok, tokIdx) => {
+                          if (tok.type === 'timestamp') {
+                            return (
+                              <button
+                                key={`ts-${lineIdx}-${tokIdx}`}
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleTimestampClick(tok.seconds);
+                                }}
+                                className="text-[#3ea6ff] hover:underline font-medium inline cursor-pointer"
+                                title={`Tua video tới ${tok.text}`}
+                              >
+                                {tok.text}
+                              </button>
+                            );
+                          }
+                          if (tok.type === 'url') {
+                            return (
+                              <button
+                                key={`url-${lineIdx}-${tokIdx}`}
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleDescriptionLinkClick(tok.href);
+                                }}
+                                className="text-[#3ea6ff] hover:underline break-all inline text-left cursor-pointer"
+                                title={tok.href}
+                              >
+                                {tok.text}
+                              </button>
+                            );
+                          }
+                          return (
+                            <React.Fragment key={`txt-${lineIdx}-${tokIdx}`}>
+                              {tok.text}
+                            </React.Fragment>
+                          );
+                        })}
+                        {lineIdx < descriptionLines.length - 1 ? '\n' : null}
+                      </React.Fragment>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setIsDescExpanded((prev) => !prev);
+                    }}
+                    className="mt-2 font-semibold text-white hover:text-[#3ea6ff] flex items-center space-x-1 transition-colors"
+                  >
+                    <span>{isDescExpanded ? 'Thu gọn' : 'Xem thêm'}</span>
+                    {isDescExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+              )}
             </div>
-
-            {/* Expandable Description */}
-            {details.description && (
-              <div
-                onClick={() => setIsDescExpanded(!isDescExpanded)}
-                className="bg-yt-card hover:bg-yt-hover p-3.5 rounded-[8px] border border-white/[0.05] cursor-pointer transition-colors duration-150 text-xs text-yt-text leading-relaxed select-text"
-              >
-                <p className={isDescExpanded ? 'whitespace-pre-wrap' : 'line-clamp-3 whitespace-pre-wrap'}>
-                  {details.description}
-                </p>
-                <div className="mt-2 font-semibold text-white flex items-center space-x-1">
-                  <span>{isDescExpanded ? 'Thu gọn' : 'Xem thêm'}</span>
-                  {isDescExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-                </div>
-              </div>
-            )}
-          </div>
+          )}
         </div>
 
         {/* Right / Secondary Column: Related Videos & Comments Tabs */}
-        <div className={`flex flex-col space-y-3 ${isTheater ? 'w-full lg:max-w-4xl mx-auto' : 'lg:w-[30%]'}`}>
-          {/* Tab buttons */}
-          <div className="flex items-center space-x-1.5 border-b border-yt-border pb-2">
-            <button
-              type="button"
-              onClick={() => setActiveTab('related')}
-              className={`px-3.5 py-1.5 text-xs font-semibold rounded-[8px] transition-colors duration-150 ${
-                activeTab === 'related'
-                  ? 'bg-yt-hover text-white border border-white/10'
-                  : 'text-yt-subtext hover:text-white hover:bg-yt-card'
-              }`}
-            >
-              Video đề xuất ({details.relatedVideos.length})
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('comments')}
-              className={`px-3.5 py-1.5 text-xs font-semibold rounded-[8px] transition-colors duration-150 ${
-                activeTab === 'comments'
-                  ? 'bg-yt-hover text-white border border-white/10'
-                  : 'text-yt-subtext hover:text-white hover:bg-yt-card'
-              }`}
-            >
-              Bình luận
-            </button>
-          </div>
-
-          {/* Related Videos List */}
-          {activeTab === 'related' && (
-            <div className="flex flex-col space-y-2">
-              {details.relatedVideos.map((item) => (
-                <div
-                  key={item.id}
-                  onClick={() => onSelectRelated(item.id)}
-                  className="flex space-x-2.5 p-2 rounded-[8px] bg-yt-card/60 hover:bg-yt-hover border border-transparent hover:border-white/[0.08] cursor-pointer group transition-colors duration-150"
-                >
-                  <div className="relative w-36 aspect-video bg-black rounded-[6px] overflow-hidden flex-shrink-0">
-                    <img
-                      src={item.thumbnail}
-                      alt={item.title}
-                      loading="lazy"
-                      className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-200"
-                    />
-                    {item.durationText && (
-                      <span className="absolute bottom-1 right-1 bg-black/85 text-[10px] font-mono font-medium px-1.5 py-0.5 rounded-[4px] text-white">
-                        {item.durationText}
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex flex-col justify-start flex-1 min-w-0 pr-1">
-                    <h4 className="text-xs font-semibold text-yt-text line-clamp-2 leading-snug group-hover:text-white transition-colors">
-                      {item.title}
-                    </h4>
-                    <p className="text-[11px] text-yt-subtext mt-1 truncate">{item.channel}</p>
-                    {item.viewCountText && (
-                      <p className="text-[10px] text-yt-subtext truncate">{item.viewCountText}</p>
-                    )}
-                  </div>
-                </div>
-              ))}
+        {!isPipMode && (
+          <div className={`flex flex-col space-y-3 ${isTheater ? 'w-full lg:max-w-4xl mx-auto' : 'lg:w-[30%]'}`}>
+            {/* Tab buttons */}
+            <div className="flex items-center space-x-1.5 border-b border-yt-border pb-2">
+              <button
+                type="button"
+                onClick={() => setActiveTab('related')}
+                className={`px-3.5 py-1.5 text-xs font-semibold rounded-[8px] transition-colors duration-150 ${
+                  activeTab === 'related'
+                    ? 'bg-yt-hover text-white border border-white/10'
+                    : 'text-yt-subtext hover:text-white hover:bg-yt-card'
+                }`}
+              >
+                Video đề xuất ({relatedVideos.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('comments')}
+                className={`px-3.5 py-1.5 text-xs font-semibold rounded-[8px] transition-colors duration-150 ${
+                  activeTab === 'comments'
+                    ? 'bg-yt-hover text-white border border-white/10'
+                    : 'text-yt-subtext hover:text-white hover:bg-yt-card'
+                }`}
+              >
+                Bình luận
+              </button>
             </div>
-          )}
 
-          {/* Comments List */}
-          {activeTab === 'comments' && (
-            <CommentsList
-              comments={comments}
-              totalCount={commentsCount}
-              loading={commentsLoading}
-            />
-          )}
-        </div>
+            {/* Related Videos List */}
+            {activeTab === 'related' && (
+              <div className="flex flex-col space-y-2">
+                {relatedVideos.length === 0 ? (
+                  <p className="text-xs text-yt-subtext py-6 text-center">
+                    Chưa có video đề xuất nào cho video này.
+                  </p>
+                ) : (
+                  relatedVideos.map((item) => (
+                    <div
+                      key={item.id}
+                      onClick={() => onSelectRelated(item.id)}
+                      className="flex space-x-2.5 p-2 rounded-[8px] bg-yt-card/60 hover:bg-yt-hover border border-transparent hover:border-white/[0.08] cursor-pointer group transition-colors duration-150"
+                    >
+                      <div className="relative w-36 aspect-video bg-black rounded-[6px] overflow-hidden flex-shrink-0">
+                        <img
+                          src={item.thumbnail}
+                          alt={item.title}
+                          loading="lazy"
+                          className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-200"
+                        />
+                        {item.durationText && (
+                          <span className="absolute bottom-1 right-1 bg-black/85 text-[10px] font-mono font-medium px-1.5 py-0.5 rounded-[4px] text-white">
+                            {item.durationText}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex flex-col justify-start flex-1 min-w-0 pr-1">
+                        <h4 className="text-xs font-semibold text-yt-text line-clamp-2 leading-snug group-hover:text-white transition-colors">
+                          {item.title}
+                        </h4>
+                        <p className="text-[11px] text-yt-subtext mt-1 truncate">{item.channel}</p>
+                        {(item.viewCountText || item.publishedText) && (
+                          <p className="text-[10px] text-yt-subtext truncate">
+                            {[item.viewCountText, item.publishedText].filter(Boolean).join(' • ')}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+
+                {relatedContinuation && (
+                  <div ref={relatedSentinelRef} className="pt-2 flex justify-center">
+                    <button
+                      type="button"
+                      disabled={loadingMoreRelated}
+                      onClick={loadMoreRelated}
+                      className="w-full py-2 px-3 rounded-[8px] bg-yt-card hover:bg-yt-hover border border-white/[0.06] text-xs font-semibold text-yt-subtext hover:text-white transition-colors disabled:opacity-60"
+                    >
+                      {loadingMoreRelated ? 'Đang tải thêm video đề xuất...' : 'Tải thêm video đề xuất'}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Comments List */}
+            {activeTab === 'comments' && (
+              <CommentsList
+                comments={comments}
+                totalCount={commentsCount}
+                loading={commentsLoading}
+              />
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

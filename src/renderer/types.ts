@@ -79,6 +79,12 @@ export interface RelatedVideoItem {
   thumbnail: string;
   durationText?: string;
   viewCountText?: string;
+  publishedText?: string;
+}
+
+export interface RelatedVideosResult {
+  items: RelatedVideoItem[];
+  continuationToken?: string;
 }
 
 export interface TayTubeVideoDetails {
@@ -98,6 +104,7 @@ export interface TayTubeVideoDetails {
   captionTracks: CaptionTrackInfo[];
   sponsorSegments: SponsorBlockSegment[];
   relatedVideos: RelatedVideoItem[];
+  relatedContinuationToken?: string;
   proxyVideoUrl?: string;
   proxyAudioUrl?: string;
   hlsManifestUrl?: string;
